@@ -208,15 +208,16 @@ export async function offerForEndedClass({ gym, cid, fromName, fromYmd, toCids, 
   for (const m of holders) {
     const who = m.child_name ? `${m.child_name} (${m.student_name || ''})` : (m.student_name || 'Člen');
     try {
-      // SPOLEK: členský příspěvek není platba za lekci -- nic se nevrací ani nenabízí (o vrácení
-      // rozhodují stanovy). Členství se na vybrané lekce přesune samo, člen dostane zprávu.
+      // SPOLEK: členský příspěvek není platba za lekci -- členovi se nic nenabízí ani nevrací a ve
+      // zprávě o vracení nic není. Členství se na vybrané lekce přesune samo. Vrátit příspěvek může
+      // jen vedení klubu, ručně v kartě člena (Ukončit členství).
       if (sellKind({ orgForm, paidTo: m.paid_to }) === 'membership') {
         const txt = toCids.length
           ? `Lekce ${fromName} v ${gym.name} od ${dCz(fromYmd)} končí.${note ? ' Důvod: ' + note + '.' : ''} Tvoje členství${m.plan_name ? ' „' + m.plan_name + '"' : ''} teď místo ní platí na: ${toNames}.`
-          : `Lekce ${fromName} v ${gym.name} od ${dCz(fromYmd)} končí.${note ? ' Důvod: ' + note + '.' : ''} Tvoje členství${m.plan_name ? ' „' + m.plan_name + '"' : ''} se tím nemění; o případném vrácení příspěvku rozhoduje spolek podle stanov.`;
+          : `Lekce ${fromName} v ${gym.name} od ${dCz(fromYmd)} končí.${note ? ' Důvod: ' + note + '.' : ''} Co bude dál po zrušení lekce, řeší klub.`;
         const txtEn = toCids.length
           ? `The class ${fromName} at ${gym.name} ends on ${dCz(fromYmd)}.${note ? ' Reason: ' + note + '.' : ''} Your membership${m.plan_name ? ' “' + m.plan_name + '”' : ''} now covers: ${toNames} instead.`
-          : `The class ${fromName} at ${gym.name} ends on ${dCz(fromYmd)}.${note ? ' Reason: ' + note + '.' : ''} Your membership${m.plan_name ? ' “' + m.plan_name + '”' : ''} stays as it is; any refund of the fee is up to the association under its statutes.`;
+          : `The class ${fromName} at ${gym.name} ends on ${dCz(fromYmd)}.${note ? ' Reason: ' + note + '.' : ''} What happens next is up to the club.`;
         const ins0 = ((await sb('pass_transfers?on_conflict=membership_id,from_cid', { method: 'POST', prefer: 'return=representation,resolution=ignore-duplicates', body: JSON.stringify({
           gym_id: gym.id, membership_id: String(m.id), student_id: m.student_id, student_name: m.student_name || null, child_name: m.child_name || null, plan_name: m.plan_name || null,
           from_cid: cid, from_name: fromName, ends_from: fromYmd, to_cids: toCids, to_names: toNames || null, deadline, offer_text: txt, note: note || null,

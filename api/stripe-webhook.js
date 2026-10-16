@@ -23,6 +23,7 @@ import { approveMemberAppOnPayment, cohortPayer } from './_member-app.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 import { pragueMonth } from './_tz.js';
 import { pragueEndOfDay } from './_memb-term.js';
+import { fulfillCheckout } from './_fulfill.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 // Adresa appky pro interní volání (ep-doklad). DŘÍV NEBYLA DEFINOVANÁ: `${APP_URL}` spadlo na
@@ -325,7 +326,7 @@ async function applySubRate(stripe, acct, subId, sub, ladderPct) {
 // Zástupce zaplatil za mladistvého -> mladistvý se to musí dozvědět. Na QR koleji mu to
 // říká klient hned po potvrzení platby; na Stripe koleji se platí mimo appku, takže tady
 // je jediné místo, kde se to dá spolehlivě poslat.
-async function notifyPaidForMinor(m, item, amount, currency) {
+export async function notifyPaidForMinor(m, item, amount, currency) {
   try {
     const forWhom = m && m.student_id, payer = m && m.paid_by;
     if (!forWhom || !payer || forWhom === payer) return;
@@ -789,62 +790,22 @@ export default async function handler(req, res) {
           }
         } catch (e) { console.error('consume credit', e.message); }
       }
+      // ZAPLACENO -> řádek v appce (rezervace, členství, lístek, zboží, doplatek). Jen server, jen
+      // podle zaplacené session; /api/session dělá totéž při návratu, kdo dřív, ten zapíše.
+      let _ful = null;
+      try { _ful = await fulfillCheckout(s, event.account || null, stripe); } catch (e) { console.error('fulfill', e && e.message); }
       // jen lekce koučů (gym jede direct-charge na účet gymu, ne přes platformu)
       if (m.booking_type === 'inperson' || m.booking_type === 'online') {
         const pi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id);
-        // IDEMPOTENCE: existuje už booking pro tento payment_intent?
-        const existing = pi ? await sbGet(`bookings?payment_intent=eq.${encodeURIComponent(pi)}&select=id,coach_id,student_id`) : [];
-        if (!existing.length) {
-          const amount = parseInt(m.base_amount || '0', 10);
-          const currency = m.booking_currency || 'CZK';
-          if (m.booking_type === 'inperson' && m.slot_id) {
-            const slots = await sbGet(`slots?id=eq.${encodeURIComponent(m.slot_id)}&select=*`);
-            const slot = slots[0];
-            if (slot) {
-              await sbPatch('slots', `id=eq.${encodeURIComponent(m.slot_id)}`, { booked: true, student: m.student_id || null });
-              await sbPost('bookings', {
-                slot_id: slot.id, student_id: m.student_id || null, coach_id: slot.coach_profile_id,
-                coach_name: m.coach_name || 'Kouč', payment_intent: pi, amount,
-                training_date: slot.date, training_time: slot.time,
-                status: 'active', type: 'inperson', currency, discipline: m.discipline || null,
-                student_name: m.student_name || null,
-                paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null,
-                minor_booking: !!(m.paid_by && m.student_id && m.paid_by !== m.student_id),
-              });
-              // ODSTRANENO: druha notifikace kouci o te same rezervaci. Klient ji posila taky, na
-              // navratu ze Stripe (kind coach_new_inperson) -- a posila ji bohatsi: format lekce,
-              // castku, kterou kouc dostane, a priznak referral bonusu. Tahle mela jen datum a cas
-              // a nemela ani `data`, takze se nedala prokliknout. Dve notifikace o jedne veci jsou
-              // horsi nez jedna; nechavame tu popisnejsi.
-              await payAmbassador(slot.coach_profile_id, amount, currency, m.discipline, pi);
-              await recordTransaction(event.account, pi, { acq_source: _acqSrcFrom(m), type: 'coach_inperson', slot_id: m.slot_id || null, discipline: m.discipline || null, member_id: m.student_id, coach_id: slot.coach_profile_id, plan: 'Lekce 1:1', gross: amount, currency, paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null });
-            await notifyPaidForMinor(m, 'Lekce 1:1', amount, currency);
-            }
-          } else if (m.booking_type === 'online' && m.coach_profile_id) {
-            await sbPost('bookings', {
-              slot_id: null, student_id: m.student_id || null, coach_id: m.coach_profile_id,
-              coach_name: m.coach_name || 'Kouč', payment_intent: pi, amount,
-              training_date: new Date().toISOString().slice(0, 10), training_time: null,
-              status: 'active', type: 'online', currency, online_format: m.online_fmt || null, discipline: m.discipline || null,
-              qty: Math.max(1, parseInt(m.online_qty || '1', 10) || 1),
-              student_name: m.student_name || null,
-              paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null,
-              minor_booking: !!(m.paid_by && m.student_id && m.paid_by !== m.student_id),
-            });
-            // ODSTRANENO ze stejneho duvodu: klient posila kind coach_new_online s formatem
-            // objednavky, castkou a referral bonusem.
-            await payAmbassador(m.coach_profile_id, amount, currency, m.discipline, pi);
-            await recordTransaction(event.account, pi, { acq_source: _acqSrcFrom(m), type: 'coach_online', discipline: m.discipline || null, member_id: m.student_id, coach_id: m.coach_profile_id, plan: m.online_fmt || 'Online', gross: amount, currency, paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null });
-            await notifyPaidForMinor(m, m.online_fmt || 'Online lekce', amount, currency);
-          }
-        } else {
-          // Rezervaci uz zalozila appka po navratu ze Stripe. Driv tu webhook skoncil a transakci
-          // ani doklad nezapsal -- kdyz je nezapsal ani /api/session, nevznikly vubec.
-          // recordTransaction je idempotentni: existujici transakci nezmeni.
-          const _b0 = existing[0] || {};
-          const _onl = (m.booking_type === 'online');
-          await recordTransaction(event.account, pi, { acq_source: _acqSrcFrom(m), type: _onl ? 'coach_online' : 'coach_inperson', slot_id: _onl ? null : (m.slot_id || null), discipline: m.discipline || null, member_id: m.student_id || _b0.student_id || null, coach_id: _b0.coach_id || m.coach_profile_id || null, plan: _onl ? (m.online_fmt || 'Online') : 'Lekce 1:1', gross: parseInt(m.base_amount || '0', 10), currency: m.booking_currency || 'CZK', paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null });
-        }
+        // Rezervaci založil fulfillCheckout (tady, nebo dřív /api/session při návratu). Transakce je
+        // idempotentní; vedlejší kroky (dítě placené rodičem) jen jednou -- u toho, kdo ji založil.
+        const _b0 = (_ful && _ful.row) || {};
+        const _onl = (m.booking_type === 'online');
+        const amount = parseInt(m.base_amount || '0', 10), currency = m.booking_currency || 'CZK';
+        const _coach = _b0.coach_id || (_ful && _ful.slot && _ful.slot.coach_profile_id) || m.coach_profile_id || null;
+        if (_ful && _ful.created) await payAmbassador(_coach, amount, currency, m.discipline, pi);
+        await recordTransaction(event.account, pi, { acq_source: _acqSrcFrom(m), type: _onl ? 'coach_online' : 'coach_inperson', slot_id: _onl ? null : (m.slot_id || null), discipline: m.discipline || null, member_id: m.student_id || _b0.student_id || null, coach_id: _coach, plan: _onl ? (m.online_fmt || 'Online') : 'Lekce 1:1', gross: amount, currency, paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null });
+        if (_ful && _ful.created) await notifyPaidForMinor(m, _onl ? (m.online_fmt || 'Online lekce') : 'Lekce 1:1', amount, currency);
       } else if (m.mtl_payment_type === 'drop_in' || m.mtl_payment_type === 'membership') {
         // GYM skupinová lekce (direct charge na účtu gymu) → 0,5 % ambassadorovi disciplíny
         await payGymAmbassador(m.mtl_disc, parseInt(m.mtl_base || '0', 10), m.mtl_currency || 'CZK', s.id, s.payment_intent);
@@ -862,13 +823,7 @@ export default async function handler(req, res) {
             if (!isNaN(_fixed.getTime()) && _fixed > new Date()) _end = _fixed;
           }
           const _pi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id);
-          if (m.membership_id) {
-            try {
-              await sbPatch('gym_memberships', `id=eq.${encodeURIComponent(m.membership_id)}`, {
-                status: 'active', payment_status: 'paid', months: _mo, period_end: _end.toISOString(), cancelled_at: null
-              });
-            } catch (e) { console.error('one-time membership activate', e.message); }
-          }
+          // Aktivaci řádku udělal fulfillCheckout (stejný výpočet konce); tady zbývá transakce a zprávy.
           try {
             // Přijetí za člena u spolku: platba činí rozhodnutí klubu účinným (_member-app.js).
             if (m.mtl_online !== '1') await approveMemberAppOnPayment({ gymId: m.gym_id, studentId: m.student_id || m.member_id || null });
@@ -893,7 +848,6 @@ export default async function handler(req, res) {
           const sub = typeof s.subscription === 'string' ? s.subscription : (s.subscription && s.subscription.id);
           // Přijetí za člena i u předplatného -- dřív jen u jednorázového členství.
           await approveMemberAppOnPayment({ gymId: m.gym_id, studentId: m.student_id || m.member_id || null });
-          if (m.membership_id && sub) { try { await sbPatch('gym_memberships', `id=eq.${encodeURIComponent(m.membership_id)}`, { stripe_subscription: sub, status: 'active' }); } catch (e) { console.error('link sub', e.message); } }
           // SLEVA ZA DOCHÁZKU na první platbu, která přijde až s kotvou (pay.js, mtl_att_mode 'next'):
           // záporná položka čeká na tu fakturu. Jen jednou -- Stripe hlásí událost i opakovaně.
           if (sub && m.mtl_att_mode === 'next' && Number(m.mtl_att_disc) > 0) {
@@ -1113,18 +1067,7 @@ export default async function handler(req, res) {
         // Event ticket (direct charge on payee account) — backstop confirm if user closed tab before redirect
         if (m.ticket_id) {
           const pi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id);
-          // Objednávka může nést víc lístků na jednu platbu. Překlápí se všechny naráz -- kdyby
-          // se potvrdil jen ten, jehož id nese metadata, zbytek by zůstal viset jako rezervace
-          // a release-cron by je za půl hodiny uvolnil, přestože jsou zaplacené.
-          {
-            let _tScope = `id=eq.${encodeURIComponent(m.ticket_id)}`;
-            try {
-              const _t0 = await sbGet(`event_tickets?id=eq.${encodeURIComponent(m.ticket_id)}&select=order_id`);
-              const _oid = _t0 && _t0[0] && _t0[0].order_id;
-              if (_oid) _tScope = `order_id=eq.${encodeURIComponent(_oid)}`;
-            } catch (e) {}
-            await sbPatch('event_tickets', _tScope, { status: 'paid', stripe_ref: pi });
-          }
+          // Lístky celé objednávky překlopil na zaplacené fulfillCheckout.
           await recordTransaction(event.account, pi, { type: 'event_ticket',  member_id: m.student_id || m.buyer_id, gym_id: m.gym_id, coach_id: m.payout_coach_id, plan: m.mtl_event || 'Event', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side' });
           await payGymAmbassador(m.mtl_disc, parseInt(m.mtl_base || '0', 10), m.mtl_currency || 'CZK', s.id, s.payment_intent);
           try { await sendTicketEmail(s, m); } catch (e) { console.error('ticket email', e.message); }

@@ -1,5 +1,6 @@
 import Stripe from 'stripe';
-import { recordTransaction as recordStripeTransaction } from './stripe-webhook.js';
+import { recordTransaction as recordStripeTransaction, notifyPaidForMinor } from './stripe-webhook.js';
+import { fulfillCheckout, sessionPaid } from './_fulfill.js';
 import { activatePartner } from './_ep.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -42,6 +43,15 @@ export default async function handler(req, res) {
 
     const opts = gymAccount ? { stripeAccount: gymAccount } : undefined;
     const session = await stripe.checkout.sessions.retrieve(sessionId, opts);
+
+    // ZAPLACENO -> ŘÁDEK V APPCE. Stejně jako webhook (kdo dřív, ten zapíše); prohlížeč už si
+    // rezervaci ani členství na „zaplaceno" sám nepřepisuje -- dostane tu výsledek a zobrazí ho.
+    let _ful = null;
+    try { _ful = await fulfillCheckout(session, gymAccount || null, stripe); } catch (e) { console.error('fulfill', e.message); _ful = { error: e.message }; }
+    try {
+      const _m = session.metadata || {};
+      if (_ful && _ful.created && _ful.kind === 'booking') await notifyPaidForMinor(_m, _m.booking_type === 'online' ? (_m.online_fmt || 'Online lekce') : 'Lekce 1:1', parseInt(_m.base_amount || '0', 10), _m.booking_currency || 'CZK');
+    } catch (e) { console.error('minor notify', e.message); }
 
     // Record the transaction from the session metadata (idempotent). This guarantees the
     // ledger + accounting export are correct even when the Stripe webhook isn't delivering
@@ -124,6 +134,8 @@ export default async function handler(req, res) {
       customer: session.customer || null,
       customerEmail: (session.customer_details && session.customer_details.email) || session.customer_email || null,
       customerName: (session.customer_details && session.customer_details.name) || null,
+      paid: sessionPaid(session),
+      fulfilled: _ful ? { kind: _ful.kind || null, created: !!_ful.created, row: _ful.row || null, rows: _ful.rows || null, skipped: _ful.skipped || null } : null,
       _tx,
     });
   } catch (err) {

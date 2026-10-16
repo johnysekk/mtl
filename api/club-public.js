@@ -155,7 +155,7 @@ export default async function handler(req, res) {
   // gyms žádný sloupec s průměrem nenese -- appka si ho počítá z gym_ratings a my taky.
   let nRat = 0, avg = null;
   try {
-    const rr = await sbGet(`gym_ratings?gym_id=eq.${encodeURIComponent(g.id)}&select=rating&limit=500`);
+    const rr = await sbGet(`gym_ratings?gym_id=eq.${encodeURIComponent(g.id)}&hidden_at=is.null&select=rating&limit=500`);
     const vals = (rr || []).map(r => Number(r.rating)).filter(v => v > 0);
     nRat = vals.length;
     if (nRat) avg = vals.reduce((a, b) => a + b, 0) / nRat;
@@ -170,7 +170,7 @@ export default async function handler(req, res) {
   // Napsané recenze. Hvězdičky samy o sobě nikoho nepřesvědčí, věta od člena ano.
   let reviews = [];
   try {
-    const rv = await sbGet(`gym_ratings?gym_id=eq.${encodeURIComponent(g.id)}&select=rating,comment,student_name,created_at&order=created_at.desc&limit=30`);
+    const rv = await sbGet(`gym_ratings?gym_id=eq.${encodeURIComponent(g.id)}&hidden_at=is.null&select=rating,comment,student_name,created_at&order=created_at.desc&limit=30`);
     reviews = (rv || [])
       .filter(r => r && r.comment && String(r.comment).trim().length > 2)
       .slice(0, 6)

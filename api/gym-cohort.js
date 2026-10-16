@@ -127,7 +127,9 @@ export default async function handler(req, res) {
       if (r.user_id) {
         matchUsers.add(r.user_id);
         if (commitLive(r.committed, r.committed_at)) committedUsers.add(r.user_id);
-        if (r.form_at) {
+        // Formulář se kopíruje do řádku každé disciplíny -- odpovědi se počítají jednou za člověka
+        // (dřív jeden formulář se šesti disciplínami dal „Dopoledne 6").
+        if (r.form_at && !formUsers.has(r.user_id)) {
           formUsers.add(r.user_id);
           const _ws = (r.windows || '').split(',').map(x => x.trim()).filter(Boolean);
           const _ls = (r.levels || '').split(',').map(x => x.trim()).filter(Boolean);
@@ -145,9 +147,10 @@ export default async function handler(req, res) {
           });
         }
       }
-      ds.forEach(d => { if (!gymDisc.size || gymDisc.has(d)) discCount[d] = (discCount[d] || 0) + 1; });
+      // Lidé, ne řádky.
+      ds.forEach(d => { if (r.user_id && (!gymDisc.size || gymDisc.has(d))) (discCount[d] = discCount[d] || new Set()).add(r.user_id); });
     }
-    const disciplines = Object.entries(discCount).sort((a, b) => b[1] - a[1]).map(([v, n]) => ({ v, n }));
+    const disciplines = Object.entries(discCount).map(([v, set]) => ({ v, n: set.size })).sort((a, b) => b.n - a.n);
 
     // Build the opportunity list: window x level pairs, each with its own distance bands. A club
     // decides on a concrete class, not on two abstract rankings.

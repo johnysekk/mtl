@@ -373,7 +373,15 @@ async function gymCheckout(req, res) {
         // Ktera pojmenovana cena za vstup to byla a jestli u ni klub jeste musi videt
         // doklad. Webhook to prepise do transakce; bez toho by sleva zmizela beze stopy.
         mtl_dropin_plan: String(req.query.dropinPlan || ''),
-        mtl_need_proof: (String(req.query.needProof || '') === '1' ? '1' : '') },
+        mtl_need_proof: (String(req.query.needProof || '') === '1' ? '1' : ''),
+        // Pro _fulfill.js: který řádek po zaplacení překlopit (nebo co založit). Prohlížeč to
+        // po návratu už sám nezapisuje.
+        mtl_booking_id: (String(merch) === '1' || String(grace) === '1') ? '' : String(bookingId || '').slice(0, 64),
+        mtl_grace: String(grace) === '1' ? '1' : '',
+        mtl_merch_id: String(merch) === '1' ? String(merchId || '').slice(0, 64) : '',
+        mtl_qty: String(merch) === '1' ? String(Math.max(1, parseInt(qty || '1', 10) || 1)) : '',
+        mtl_variant: String(merch) === '1' ? String(variant || '').slice(0, 120) : '',
+        mtl_attr: String(req.query.attr || '').slice(0, 120) },
       line_items: [
         { price_data: { currency: cur, product_data: { name: `${String(merch)==='1' ? 'Zboží' : 'Jednorázový vstup'} · ${className || 'Lekce'} — ${gymName || 'MTL Gym'}` }, unit_amount: unitAmount }, quantity: 1 },
       ],

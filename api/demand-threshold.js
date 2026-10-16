@@ -4,6 +4,7 @@
 // the client never reads others' signals or writes others' notifications. Deduped per
 // ~30 km cluster + discipline via demand_alerts (cooldown).
 
+import { ccOf } from './_country.js';
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const svc = { apikey: SKEY, Authorization: `Bearer ${SKEY}`, 'Content-Type': 'application/json' };
@@ -37,10 +38,12 @@ export default async function handler(req, res) {
     // unique people PER discipline + a representative city/country
     const byDisc = {};          // disc -> { users:Set, cities:{} }
     const cities = {};
-    let country = '';
+    // Země oblasti = ta, kterou uvádí většina řádků (jako kód CZ/FR…; dřív vyhrál první řádek,
+    // a jeden člověk, který si prohlížel Francii, přejmenoval celé Brno na „Brno, Francie").
+    const ccCount = {};
     near.forEach(r => {
       const c = (r.city || '').trim(); if (c) cities[c] = (cities[c] || 0) + 1;
-      if (r.country && !country) country = r.country;
+      const cc = ccOf(r.country); if (cc) ccCount[cc] = (ccCount[cc] || 0) + 1;
       const _strong = (r.source !== 'passive') || ((r.opens || 1) >= 3);
       (r.disciplines || '').split(',').map(x => x.trim()).filter(Boolean).forEach(d => {
         if (!byDisc[d]) byDisc[d] = { users: new Set(), cities: {} };
@@ -49,6 +52,7 @@ export default async function handler(req, res) {
       });
     });
 
+    const country = (Object.entries(ccCount).sort((a, b) => b[1] - a[1])[0] || [''])[0];
     const grid = Math.round(lat / 0.25) + '_' + Math.round(lng / 0.25);
     const since = new Date(Date.now() - COOLDOWN_DAYS * 86400000).toISOString();
     const cityAll = (Object.entries(cities).sort((a, b) => b[1] - a[1])[0] || [''])[0];

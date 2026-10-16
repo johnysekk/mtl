@@ -6,7 +6,7 @@
 // jméno a e-mail oznamovatele a prohlášení o dobré víře (uloží se přesně to znění, které viděl).
 // Nahlášený obsah si server sám dohledá a uloží jeho snímek -- klient mu ho podstrčit nemůže.
 //
-//   POST { action:'report', kind, id, category, explanation, url, name, email, good_faith_text, lang }
+//   POST { action:'report', kind, id, category, explanation, url, good_faith_text, lang }   (jméno a e-mail z účtu)
 //        -> potvrzení o přijetí oznamovateli (notifikace + e-mail) a zakladateli úkol s proklikem
 //   POST { action:'decide', report_id, status:'no_action'|'restricted', act, ground, text }   (jen zakladatel)
 // kind: gym | coach | org (i dodavatel) | event | cohort | gym_review | coach_review | student
@@ -28,9 +28,11 @@ async function sb(path, init = {}) {
 }
 const sbGet = (p) => sb(p).catch(() => []);
 const one = async (p) => ((await sbGet(p)) || [])[0] || null;
+// Přihlášený uživatel z tokenu. Při neúspěchu vrátí důvod (bez tokenu / stav ověření), ať je
+// v hlášce vidět, co selhalo.
 async function whoami(req) {
-  const tok = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim(); if (!tok) return null;
-  try { const r = await fetch(`${SB}/auth/v1/user`, { headers: { apikey: KEY, Authorization: `Bearer ${tok}` } }); if (!r.ok) return null; const u = await r.json(); return (u && u.id) ? u : null; } catch (e) { return null; }
+  const tok = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim(); if (!tok || tok === 'null' || tok === 'undefined') return { why: 'no_token' };
+  try { const r = await fetch(`${SB}/auth/v1/user`, { headers: { apikey: KEY, Authorization: `Bearer ${tok}` } }); if (!r.ok) return { why: 'auth_' + r.status }; const u = await r.json(); return (u && u.id) ? u : { why: 'no_user' }; } catch (e) { return { why: 'auth_fetch' }; }
 }
 async function notify(userId, kind, cs, en, data) {
   if (!userId) return;
@@ -90,26 +92,54 @@ async function providerOf(me, sid) {
 }
 
 const REDRESS_CS = 'S rozhodnutím nesouhlasíš? Odpověz nám na support@martialtraininglab.com (s číslem oznámení) a znovu ho posoudíme. Můžeš se také obrátit na orgán mimosoudního řešení sporů podle čl. 21 nařízení o digitálních službách nebo na soud.';
+// Skrýt / vrátit recenzi. Vrací true, když se něco změnilo.
+async function hideReview(r0, hide) {
+  if (r0.target_kind === 'gym_review') {
+    const cur = await one(`gym_ratings?id=eq.${q(r0.target_id)}&select=id,hidden_at`);
+    if (!cur || (hide ? cur.hidden_at : !cur.hidden_at)) return false;
+    await sb(`gym_ratings?id=eq.${q(r0.target_id)}`, { method: 'PATCH', prefer: 'return=minimal',
+      body: JSON.stringify(hide ? { hidden_at: new Date().toISOString(), hidden_report_id: r0.id } : { hidden_at: null, hidden_report_id: null }) });
+    return true;
+  }
+  if (r0.target_kind === 'coach_review') {
+    const cur = await one(`bookings?id=eq.${q(r0.target_id)}&select=id,rating,review,review_hidden`);
+    if (!cur) return false;
+    if (hide) {
+      if (cur.review_hidden || (cur.rating == null && !cur.review)) return false;
+      await sb(`bookings?id=eq.${q(cur.id)}`, { method: 'PATCH', prefer: 'return=minimal',
+        body: JSON.stringify({ rating: null, review: null, review_hidden: { rating: cur.rating, review: cur.review, report_id: r0.id, at: new Date().toISOString() } }) });
+    } else {
+      const h = cur.review_hidden; if (!h) return false;
+      await sb(`bookings?id=eq.${q(cur.id)}`, { method: 'PATCH', prefer: 'return=minimal',
+        body: JSON.stringify({ rating: h.rating == null ? null : h.rating, review: h.review || null, review_hidden: null }) });
+    }
+    return true;
+  }
+  return false;
+}
 const REDRESS_EN = 'Disagree with the decision? Reply to support@martialtraininglab.com (quote the notice number) and we will review it again. You can also turn to an out-of-court dispute settlement body under Art. 21 of the Digital Services Act, or to a court.';
 
 export default async function handler(req, res) {
   if (!SB || !KEY) return res.status(500).json({ ok: false, error: 'not configured' });
   if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'POST only' });
   try {
-    const u = await whoami(req); if (!u) return res.status(401).json({ ok: false, error: 'Přihlas se.' });
+    const u = await whoami(req); if (!u || !u.id) return res.status(401).json({ ok: false, error: `Přihlášení se nepodařilo ověřit (${(u && u.why) || 'auth'}) — odhlas se a přihlas znovu.` });
     const me = u.id;
     const b = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
 
     if (b.action === 'report') {
       const kind = String(b.kind || ''), id = String(b.id || '').slice(0, 80);
       const category = String(b.category || ''), explanation = String(b.explanation || '').trim().slice(0, 4000);
-      const name = String(b.name || '').trim().slice(0, 120), email = String(b.email || u.email || '').trim().slice(0, 160);
+      // Oznamovatel = přihlášený účet: jméno z profilu, e-mail z přihlášení (v appce se needitují).
+      const prof = await one(`profiles?id=eq.${q(me)}&select=name`);
+      const name = String((prof && prof.name) || (u.user_metadata && u.user_metadata.name) || '').trim().slice(0, 120) || 'Uživatel MTL';
+      const email = String(u.email || '').trim().slice(0, 160);
       const goodFaith = String(b.good_faith_text || '').trim().slice(0, 600);
       let url = String(b.url || '').trim().slice(0, 500);
       if (!KINDS.includes(kind) || !id) return res.status(400).json({ ok: false, error: 'Neznámý obsah.' });
       if (!CATEGORIES[category]) return res.status(400).json({ ok: false, error: 'Vyber důvod.' });
       if (explanation.length < 20) return res.status(400).json({ ok: false, error: 'Popiš, co je na obsahu špatně (aspoň 20 znaků).' });
-      if (!name || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ ok: false, error: 'Vyplň jméno a platný e-mail.' });
+      if (!email) return res.status(400).json({ ok: false, error: 'Účet nemá e-mail.' });
       if (!goodFaith) return res.status(400).json({ ok: false, error: 'Potvrď prohlášení o dobré víře.' });
       if (!/^https:\/\//i.test(url)) url = APP;
       // Proti zahlcení: nejvýš 5 oznámení za 24 h (a níž jedno otevřené na stejný obsah).
@@ -150,9 +180,25 @@ export default async function handler(req, res) {
           if (reps.size >= 2) await sb(`profiles?id=eq.${q(id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ risk_flag: true, risk_note: `Nahlášen ${reps.size} poskytovateli (naposledy ${name}, ${no}) ${new Date().toISOString().slice(0, 10)}` }) });
         } catch (e) { console.error('[content-report] student_reports', e.message); }
       }
+      // Zakladateli s detailem: u recenze hvězdy, začátek textu a kde je (klub / kouč), proklik
+      // vede rovnou na recenzi, kde ji jde skrýt.
+      let det = '', detEn = '';
+      if (kind === 'gym_review' || kind === 'coach_review') {
+        const sn = t.snapshot || {}, txt = String(sn.comment || sn.review || '').replace(/\s+/g, ' ').trim();
+        let where = '';
+        try {
+          if (kind === 'gym_review' && t.gymId) where = ((await one(`gyms?id=eq.${q(t.gymId)}&select=name`)) || {}).name || '';
+          if (kind === 'coach_review' && sn.coach_id) where = ((await one(`profiles?id=eq.${q(sn.coach_id)}&select=name`)) || {}).name || '';
+        } catch (e) {}
+        const stars = sn.rating != null ? ` ${'★'.repeat(Math.max(0, Math.min(5, Math.round(Number(sn.rating) || 0))))}` : '';
+        const quote = txt ? ` „${txt.slice(0, 140)}${txt.length > 140 ? '…' : ''}"` : '';
+        det = `${where ? ' U: ' + where + '.' : ''}${stars}${quote}`;
+        detEn = `${where ? ' At: ' + where + '.' : ''}${stars}${quote}`;
+      }
       if (FOUNDER_UUID) await notify(FOUNDER_UUID, 'dsa_report_new',
-        `🚩 Nové oznámení ${no}: ${what}${lbl} · ${CATEGORIES[category][0]}. Od: ${name}.`,
-        `🚩 New notice ${no}: ${whatEn}${lbl} · ${CATEGORIES[category][1]}. From: ${name}.`, { report_id: row.id, no });
+        `🚩 Nové oznámení ${no}: ${what}${lbl} · ${CATEGORIES[category][0]}.${det} Od: ${name}. Důvod: ${explanation.slice(0, 200)}`,
+        `🚩 New notice ${no}: ${whatEn}${lbl} · ${CATEGORIES[category][1]}.${detEn} From: ${name}. Reason: ${explanation.slice(0, 200)}`,
+        { report_id: row.id, no, target_kind: kind });
       return res.status(200).json({ ok: true, id: row.id, no });
     }
 
@@ -166,12 +212,14 @@ export default async function handler(req, res) {
       if (!r0) return res.status(404).json({ ok: false, error: 'Oznámení nenalezeno.' });
       if (r0.status !== 'received') return res.status(409).json({ ok: false, error: 'Už je rozhodnuto.' });
       let action = act || (status === 'restricted' ? 'omezeno' : 'bez zásahu');
-      // Recenzi jde odstranit rovnou (snímek zůstává u oznámení). Recenze kouče je hodnocení u
-      // rezervace -- vymaže se jen hodnocení, rezervace (platba, doklad) zůstává.
-      if (status === 'restricted' && b.act === 'remove_review') {
-        if (r0.target_kind === 'gym_review') { await sb(`gym_ratings?id=eq.${q(r0.target_id)}`, { method: 'DELETE', prefer: 'return=minimal' }); action = 'recenze odstraněna'; }
-        else if (r0.target_kind === 'coach_review') { await sb(`bookings?id=eq.${q(r0.target_id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ rating: null, review: null }) }); action = 'recenze odstraněna'; }
+      // Recenzi jde rovnou SKRÝT (ne smazat -- jde vrátit, snímek zůstává u oznámení). Recenze
+      // kouče je hodnocení u rezervace: přesune se do review_hidden, rezervace (platba, doklad)
+      // zůstává a hodnocení přestane počítat do průměru kouče.
+      if (status === 'restricted' && (b.act === 'hide_review' || b.act === 'remove_review')) {
+        if (!(await hideReview(r0, true))) return res.status(409).json({ ok: false, error: 'Recenzi se nepodařilo skrýt (už neexistuje?).' });
+        action = 'recenze skryta';
       }
+      const actionEn = ({ 'recenze skryta': 'review hidden', 'bez zásahu': 'no action', 'omezeno': 'restricted' })[action] || action;
       const nowIso = new Date().toISOString();
       const upd = ((await sb(`content_reports?id=eq.${q(r0.id)}&status=eq.received`, { method: 'PATCH', prefer: 'return=representation', body: JSON.stringify({
         status, decided_at: nowIso, decided_by: me, decision_action: action, decision_ground: ground || null, decision_text: text }) })) || [])[0];
@@ -179,7 +227,7 @@ export default async function handler(req, res) {
       const no = `DSA-${r0.no}`, what = KIND_CS[r0.target_kind], whatEn = KIND_EN[r0.target_kind], lbl = r0.target_label ? ` „${r0.target_label}"` : '';
       // Oznamovateli rozhodnutí (čl. 16 odst. 5).
       const decCs = status === 'restricted' ? `Obsah jsme omezili (${action}).` : 'Obsah jsme posoudili a nezasáhli jsme.';
-      const decEn = status === 'restricted' ? `We restricted the content (${action}).` : 'We reviewed the content and took no action.';
+      const decEn = status === 'restricted' ? `We restricted the content (${actionEn}).` : 'We reviewed the content and took no action.';
       if (r0.reporter_id) await notify(r0.reporter_id, 'dsa_decided', `⚖️ Oznámení ${no} (${what}${lbl}): ${decCs} ${text}`, `⚖️ Notice ${no} (${whatEn}${lbl}): ${decEn} ${text}`, { report_id: r0.id, no });
       await providerMail(r0.reporter_email, `Rozhodnutí k oznámení ${no}`, [
         `Dobrý den, ${esc(r0.reporter_name || '')},`, `k vašemu oznámení <b>${esc(no)}</b> (${esc(what)}${esc(lbl)}): ${esc(decCs)}`,
@@ -187,7 +235,7 @@ export default async function handler(req, res) {
       // Autorovi při omezení odůvodnění (čl. 17): co, proč, na základě čeho, jak se bránit.
       if (status === 'restricted' && r0.target_owner_id) {
         const cs = `⚖️ Omezili jsme tvůj obsah: ${what}${lbl}. Co jsme udělali: ${action}. Důvod: ${ground}. ${text} Rozhodnutí vychází z oznámení ${no}, posuzoval ho člověk, ne automat. ${REDRESS_CS}`;
-        const en = `⚖️ We restricted your content: ${whatEn}${lbl}. Action: ${action}. Ground: ${ground}. ${text} The decision is based on notice ${no} and was made by a person, not automatically. ${REDRESS_EN}`;
+        const en = `⚖️ We restricted your content: ${whatEn}${lbl}. Action: ${actionEn}. Ground: ${ground}. ${text} The decision is based on notice ${no} and was made by a person, not automatically. ${REDRESS_EN}`;
         await notify(r0.target_owner_id, 'dsa_restricted', cs, en, { report_id: r0.id, no });
         const ow = await one(`profiles?id=eq.${q(r0.target_owner_id)}&select=email,name`);
         if (ow && ow.email) await providerMail(ow.email, `Omezení obsahu (${no})`, [
@@ -196,6 +244,19 @@ export default async function handler(req, res) {
           `Rozhodnutí vychází z oznámení ${esc(no)} a posuzoval ho člověk, ne automatizovaný systém.`, esc(REDRESS_CS) ], null);
       }
       return res.status(200).json({ ok: true, status, action });
+    }
+    // Vrátit skrytou recenzi (např. po úspěšném rozporu autora). Jen zakladatel.
+    if (b.action === 'unhide_review') {
+      if (!FOUNDER_UUID || String(me) !== FOUNDER_UUID) return res.status(403).json({ ok: false, error: 'forbidden' });
+      const r0 = await one(`content_reports?id=eq.${q(String(b.report_id || ''))}&select=*`);
+      if (!r0 || !/_review$/.test(r0.target_kind)) return res.status(404).json({ ok: false, error: 'Oznámení nenalezeno.' });
+      if (!(await hideReview(r0, false))) return res.status(409).json({ ok: false, error: 'Recenze není skrytá.' });
+      await sb(`content_reports?id=eq.${q(r0.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({
+        decision_action: `${r0.decision_action || ''} · znovu zobrazena ${new Date().toISOString().slice(0, 10)}`.slice(0, 300) }) });
+      if (r0.target_owner_id) await notify(r0.target_owner_id, 'dsa_restored',
+        `✅ Tvoje recenze (${r0.target_label || ''}) je znovu zobrazená. Rozhodnutí k oznámení DSA-${r0.no} jsme změnili.`,
+        `✅ Your review (${r0.target_label || ''}) is visible again. We changed the decision on notice DSA-${r0.no}.`, { report_id: r0.id, no: `DSA-${r0.no}`, gym_id: (r0.target_snapshot || {}).gym_id || null, coach_id: (r0.target_snapshot || {}).coach_id || null });
+      return res.status(200).json({ ok: true });
     }
     return res.status(400).json({ ok: false, error: 'unknown action' });
   } catch (e) {

@@ -6,6 +6,7 @@ const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const svc = { apikey: SKEY, Authorization: `Bearer ${SKEY}`, 'Content-Type': 'application/json' };
 import { LOCAL_KM, DEMAND_FRESH_DAYS, commitLive, discList as _discList } from './_geo.js';
+import { ccOf, normName as _norm } from './_country.js';
 
 async function pagedGet(path) {
   let out = [], PAGE = 1000;
@@ -49,7 +50,7 @@ export default async function handler(req, res) {
     // people looking and twenty-five forms filled, which cannot happen. Same window the club panel
     // uses, so both sides now describe the same population.
     const fresh = new Date(Date.now() - DEMAND_FRESH_DAYS * 86400000).toISOString();
-    const rows = await pagedGet(`demand_signals?select=user_id,city,country,disciplines,created_at,last_seen_at,lat,lng,source,opens,committed,committed_at,form_at,windows,levels,reasons,wanted_gyms&source=neq.resolved&last_seen_at=gte.${fresh}&order=created_at.asc`);
+    const rows = await pagedGet(`demand_signals?select=user_id,city,country,discipline,disciplines,created_at,last_seen_at,lat,lng,source,opens,committed,committed_at,form_at,windows,levels,reasons,wanted_gyms&source=neq.resolved&last_seen_at=gte.${fresh}&order=created_at.asc`);
 
     // Resolved rows are the CONVERSION numerator: people who asked and have since started training
     // somewhere. resolve_demand() flips them rather than deleting, so the evidence stays. Note this
@@ -85,26 +86,39 @@ export default async function handler(req, res) {
 
     // Accumulation lives in a function because the second pass has to redo it from scratch once the
     // clusters have settled -- the totals are sets and counters, so they cannot simply be moved.
-    const newCluster = (lat, lng, country) => ({
+    // VŠECHNO SE POČÍTÁ PO LIDECH, NE PO ŘÁDCÍCH. Jeden člověk má řádek za každou disciplínu (a
+    // formulář se kopíruje do každého z nich), takže počty po řádcích násobily: jeden formulář se
+    // šesti disciplínami dal „Dopoledne 6". Každá množina tu drží id lidí.
+    const newCluster = (lat, lng) => ({
       lat, lng, alat: lat, alng: lng, n: 0, members: [],
-      users: new Map(), exU: new Set(), pasU: new Set(), strongU: new Set(), comU: new Set(),
-      formU: new Set(), wantG: {}, namedU: new Set(), unnamedU: new Set(),
-      win: {}, lvl: {}, why: {}, resolvedU: new Set(), disc: {}, cities: {}, country: country || '', last: '', first: '',
+      users: new Map(), exU: new Set(), strongU: new Set(), comU: new Set(),
+      formRow: new Map(), wantG: {}, namedU: new Set(), unnamedU: new Set(),
+      resolvedU: new Set(), discU: {}, cityU: {}, ccU: {}, last: '', first: '',
     });
+    const _discOf = (r) => { const out = new Set(); if (r.discipline) out.add(String(r.discipline).trim()); (r.disciplines || '').split(',').map((x) => x.trim()).filter(Boolean).forEach((d) => out.add(d)); return [...out]; };
+    const _addU = (obj, key, uid) => { if (!key || !uid) return; (obj[key] = obj[key] || new Set()).add(uid); };
     const addToCluster = (c, r, lat, lng) => {
-      c.lat = (c.lat * c.n + lat) / (c.n + 1);
-      c.lng = (c.lng * c.n + lng) / (c.n + 1);
-      c.n++;
-      const city = (r.city || '').trim(), country = (r.country || '').trim();
-      if (r.user_id) {
-        const _ts = new Date(r.last_seen_at || r.created_at || 0).getTime();
-        if (_ts > (c.users.get(r.user_id) || 0)) c.users.set(r.user_id, _ts);
-        (r.source === 'passive' ? c.pasU : c.exU).add(r.user_id);
-        if ((r.source !== 'passive') || ((r.opens || 1) >= 3)) c.strongU.add(r.user_id);
-        if (commitLive(r.committed, r.committed_at)) c.comU.add(r.user_id);
+      if (lat != null && lng != null) {
+        c.lat = (c.lat * c.n + lat) / (c.n + 1);
+        c.lng = (c.lng * c.n + lng) / (c.n + 1);
       }
-      if (country && !c.country) c.country = country;
-      if (city) c.cities[city] = (c.cities[city] || 0) + 1;
+      c.n++;
+      const city = (r.city || '').trim(), cc = ccOf(r.country), u = r.user_id;
+      const active = !!(r.form_at || r.source !== 'passive');
+      const strong = active || ((r.opens || 1) >= 3), com = commitLive(r.committed, r.committed_at);
+      if (u) {
+        const _ts = new Date(r.last_seen_at || r.created_at || 0).getTime();
+        if (_ts > (c.users.get(u) || 0)) c.users.set(u, _ts);
+        if (active) c.exU.add(u);
+        if (strong) c.strongU.add(u);
+        if (com) c.comU.add(u);
+        _addU(c.ccU, cc, u);
+        _addU(c.cityU, city, u);
+        for (const d of _discOf(r)) {
+          const x = (c.discU[d] = c.discU[d] || { people: new Set(), active: new Set(), com: new Set(), strong: new Set() });
+          x.people.add(u); if (active) x.active.add(u); if (com) x.com.add(u); if (strong) x.strong.add(u);
+        }
+      }
       if (r.created_at > c.last) c.last = r.created_at;
       // How long this demand has been building, not just when it was last touched. A cluster that
       // has been accumulating for three months is a different proposition from one that appeared
@@ -112,20 +126,24 @@ export default async function handler(req, res) {
       // could be a single class emptying out or one shared link. Only the newest signal was kept,
       // so that difference was invisible.
       if (!c.first || r.created_at < c.first) c.first = r.created_at;
-      addDisc(c.disc, r.disciplines);
-      if (r.form_at && r.user_id) {
-        c.formU.add(r.user_id);
-        // Which clubs people said they would go to. The founder needs this even below the club
-        // threshold: it is the earliest sign that demand is forming around a specific gym.
-        const _wl = (r.wanted_gyms || '').split(',').map(x => x.trim()).filter(Boolean);
-        _wl.forEach(g => { (c.wantG[g] = c.wantG[g] || new Set()).add(r.user_id); });
-        // Named somebody vs named nobody. The second group is the honest "none of these will do".
-        (_wl.length ? c.namedU : c.unnamedU).add(r.user_id);
-        addDisc(c.win, r.windows);
-        addDisc(c.lvl, r.levels);
-        addDisc(c.why, r.reasons);
-      }
+      // Formulář: od každého člověka jen ten POSLEDNÍ (kopie v řádcích dalších disciplín se nepočítají).
+      if (r.form_at && u) { const prev = c.formRow.get(u); if (!prev || String(r.form_at) > String(prev.form_at)) c.formRow.set(u, r); }
     };
+    // Odpovědi z formulářů -- jednou za člověka.
+    const formTally = (c) => {
+      const win = {}, lvl = {}, why = {};
+      c.wantG = {}; c.namedU = new Set(); c.unnamedU = new Set();
+      c.formRow.forEach((r, u) => {
+        addDisc(win, r.windows); addDisc(lvl, r.levels); addDisc(why, r.reasons);
+        // Which clubs people said they would go to -- the earliest sign that demand is forming
+        // around a specific gym. Named nobody = the honest "none of these will do".
+        const _wl = (r.wanted_gyms || '').split(',').map((x) => x.trim()).filter(Boolean);
+        _wl.forEach((g) => { (c.wantG[g] = c.wantG[g] || new Set()).add(u); });
+        (_wl.length ? c.namedU : c.unnamedU).add(u);
+      });
+      return { win, lvl, why };
+    };
+    const topBy = (obj) => (Object.entries(obj).sort((a, b) => b[1].size - a[1].size)[0] || [''])[0];
 
     const clusters = [];
     const noCoord = {}; // signals without coords -> exact city|country buckets
@@ -145,16 +163,14 @@ export default async function handler(req, res) {
         for (const c of clusters) { const d = hav(lat, lng, c.alat, c.alng); if (d < bestD) { bestD = d; best = c; } }
         let c;
         if (best && bestD <= CLUSTER_KM) { c = best; }
-        else { c = newCluster(lat, lng, country); clusters.push(c); }
+        else { c = newCluster(lat, lng); clusters.push(c); }
         c.members.push(r);
         addToCluster(c, r, lat, lng);
       } else {
-        const key = country + '|' + (city || '(unknown)');
-        if (!noCoord[key]) noCoord[key] = { city: city || '(unknown)', country, users: new Map(), exU: new Set(), pasU: new Set(), strongU: new Set(), comU: new Set(), formU: new Set(), disc: {}, last: '' };
-        const m = noCoord[key];
-        if (r.user_id) { const _ts = new Date(r.last_seen_at || r.created_at || 0).getTime(); if (_ts > (m.users.get(r.user_id) || 0)) m.users.set(r.user_id, _ts); (r.source==='passive'?m.pasU:m.exU).add(r.user_id); if((r.source!=='passive')||((r.opens||1)>=3)) m.strongU.add(r.user_id); if(commitLive(r.committed, r.committed_at)) m.comU.add(r.user_id); }
-        if (r.created_at > m.last) m.last = r.created_at;
-        addDisc(m.disc, r.disciplines);
+        // Bez souřadnic: podle země (kód) a města bez ohledu na velikost písmen a diakritiku.
+        const key = (ccOf(country) || _norm(country)) + '|' + (_norm(city) || '(unknown)');
+        if (!noCoord[key]) noCoord[key] = newCluster(null, null);
+        addToCluster(noCoord[key], r, null, null);
       }
     });
 
@@ -207,7 +223,7 @@ export default async function handler(req, res) {
       // Rebuild the aggregates from the settled membership.
       clusters.length = 0;
       for (const m of merged) {
-        const c = newCluster(m.lat, m.lng, '');
+        const c = newCluster(m.lat, m.lng);
         for (const r of m.members) { c.members.push(r); addToCluster(c, r, +r.lat, +r.lng); }
         // Keep the settled centre: addToCluster recomputes a running mean from the member order,
         // which lands in the same place but should not be allowed to drift the anchor.
@@ -247,40 +263,45 @@ export default async function handler(req, res) {
     // ratio that is low simply because nothing has happened yet.
     const REJECT_SHARE = 0.6;   // most form-fillers named nobody -> supply is the problem
     const REJECT_MIN = 5;       // below this the share is noise
-    const fromClusters = clusters.map(c => {
-      const dl = discList(c.disc);
-      const topDisc = dl.length ? dl[0].v : null;
-      const sup = supplyNear(c.lat, c.lng, topDisc);
+    const summarize = (c, coords) => {
       const pp = peopleScore(c.users, c.strongU);
+      // Disciplíny po lidech (kolik lidí chce danou věc), včetně rozpadu, který dřív appka
+      // počítala sama dotazem podle přesného názvu města (a po řádcích).
+      const byDisc = Object.entries(c.discU).map(([v, x]) => ({ v, n: x.people.size, people: x.people.size,
+        active: x.active.size, passive: x.people.size - x.active.size, committed: x.com.size, strong: x.strong.size }))
+        .sort((a, b) => b.people - a.people);
+      const dl = byDisc.map((x) => ({ v: x.v, n: x.people }));
+      const topDisc = dl.length ? dl[0].v : null;
+      const sup = coords ? supplyNear(c.lat, c.lng, topDisc) : { near: null, nearDisc: null };
       const resolved = c.resolvedU.size;
       const base = pp.people + resolved;
       const CONV_MIN_SAMPLE = 8;   // below this the ratio is noise, so show nothing
       const conversion = base >= CONV_MIN_SAMPLE ? +(resolved / base).toFixed(3) : null;
+      const ft = formTally(c);
       const _named = c.namedU.size, _unnamed = c.unnamedU.size, _both = _named + _unnamed;
       const rejected = _both >= REJECT_MIN ? +(_unnamed / _both).toFixed(3) : null;
-      const queue = (sup.nearDisc === 0)
-        ? 'none'
-        : ((rejected != null && rejected >= REJECT_SHARE) ? 'conv' : 'add');
+      const queue = !coords ? 'none' : ((sup.nearDisc === 0) ? 'none' : ((rejected != null && rejected >= REJECT_SHARE) ? 'conv' : 'add'));
+      const cc = topBy(c.ccU), city = topBy(c.cityU) || '(area)';
+      // Aktivní = vyplnil formulář nebo sám požádal; pasivní = jen viděl prázdný deck. Každý
+      // člověk je právě v jedné skupině (dřív mohl být v obou a součet byl větší než celek).
+      let active = 0; c.users.forEach((ts, u) => { if (recW(ts) > 0 && c.exU.has(u)) active++; });
       return {
         queue, resolved, conversion, rejected, named: _named, unnamed: _unnamed,
-        forms: c.formU.size,
-        windows: discList(c.win), levels: discList(c.lvl), reasons: discList(c.why),
+        forms: c.formRow.size,
+        windows: discList(ft.win), levels: discList(ft.lvl), reasons: discList(ft.why),
         wanted: Object.entries(c.wantG).map(([g, set]) => ({ gym: g, name: gymName[g] || '', n: set.size })).sort((a, b) => b.n - a.n).slice(0, 8),
-        city: (Object.entries(c.cities).sort((a, b) => b[1] - a[1])[0] || ['(area)'])[0],
-        country: c.country, people: pp.people, score: pp.score, explicit: c.exU.size, passive: c.pasU.size, committed: c.comU.size, disciplines: dl, last: c.last, first: c.first,
-        lat: +c.lat.toFixed(3), lng: +c.lng.toFixed(3),
-        cluster_key: Math.round(c.lat / 0.25) + '_' + Math.round(c.lng / 0.25),
+        city, country_code: cc || null, country: cc || '',
+        people: pp.people, score: pp.score, explicit: active, passive: Math.max(0, pp.people - active), committed: c.comU.size,
+        disciplines: dl, by_disc: byDisc, last: c.last, first: c.first,
+        lat: coords ? +c.lat.toFixed(3) : null, lng: coords ? +c.lng.toFixed(3) : null,
+        // Klíč oblasti pro stav (oslovený / získaný) a kontakty: mřížka podle středu oblasti.
+        cluster_key: coords ? (Math.round(c.lat / 0.25) + '_' + Math.round(c.lng / 0.25)) : ('city:' + (cc || '') + ':' + _norm(city)),
         gyms_near: sup.near, gyms_near_disc: sup.nearDisc,
-        underserved: sup.nearDisc === 0,   // nobody within SUPPLY_KM (20km) teaches what they most want
+        underserved: coords ? sup.nearDisc === 0 : false,   // nobody within SUPPLY_KM (20km) teaches what they most want
       };
-    });
-    const fromNoCoord = Object.values(noCoord).map(m => { const pp = peopleScore(m.users, m.strongU); return {
-      city: m.city, country: m.country, people: pp.people, score: pp.score, explicit: m.exU.size, passive: m.pasU.size, committed: m.comU.size, disciplines: discList(m.disc), last: m.last,
-      gyms_near: null, gyms_near_disc: null, underserved: false,
-      queue: 'none', resolved: 0, conversion: null, rejected: null, named: 0, unnamed: 0, forms: m.formU ? m.formU.size : 0,
-      windows: [], levels: [], reasons: [],
-      cluster_key: 'city:' + (m.city || '').toLowerCase(),
-    }; });
+    };
+    const fromClusters = clusters.map((c) => summarize(c, true));
+    const fromNoCoord = Object.values(noCoord).map((m) => summarize(m, false));
     const hotspots = fromClusters.concat(fromNoCoord).filter(h => h.people > 0).sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, 100);
     // attach acquisition-pipeline status (new | contacted | won | lost)
     try {
