@@ -248,17 +248,21 @@ export default async function handler(req, res) {
         const when = new Date(m.period_end).toLocaleDateString('cs-CZ', { timeZone: 'Europe/Prague' });
         const whenEn = new Date(m.period_end).toLocaleDateString('en-GB', { timeZone: 'Europe/Prague' });
         const who = m.child_name ? ` (${m.child_name})` : '';
-        const pctTxt = String(r.pct).replace('.', ',');
         const plan = m.plan_name ? ` ${m.plan_name}` : '';
+        // Co pravidlo chtělo a jak to dopadlo -- obě čísla celá, žádná procenta.
+        const reqCs = [r.needVisits !== null ? `aspoň ${r.needVisits}× trénink` : '', r.allowAbs !== null ? `nejvýš ${r.allowAbs} ${(r.allowAbs >= 1 && r.allowAbs <= 4) ? 'absence' : 'absencí'}` : ''].filter(Boolean).join(' a ');
+        const reqEn = [r.needVisits !== null ? `at least ${r.needVisits} sessions` : '', r.allowAbs !== null ? `at most ${r.allowAbs} absences` : ''].filter(Boolean).join(' and ');
+        const gotCs = `${r.visits}× trénink, ${r.absences} ${r.absences === 1 ? 'absence' : (r.absences >= 2 && r.absences <= 4 ? 'absence' : 'absencí')}`;
+        const gotEn = `${r.visits} session${r.visits === 1 ? '' : 's'}, ${r.absences} absence${r.absences === 1 ? '' : 's'}`;
         const cs = r.amount
-          ? `🎯 Docházka ${pctTxt} %${who}: z ${r.reserved} rezervovaných tréninků jsi odchodil(a) ${r.attended}. Další platba${plan} v ${g.name || m.gym_name || 'klubu'} (${when}) bude o ${fmt(r.amount, cur)} nižší: ${fmt(Math.max(0, (Number(m.amount) || 0) - r.amount), cur)} místo ${fmt(m.amount, cur)}.`
-          : `📊 Docházka ${pctTxt} %${who}: z ${r.reserved} rezervovaných tréninků jsi odchodil(a) ${r.attended}. Na slevu ${fmt(r.rule.amt * Math.max(1, parseInt(m.months, 10) || 1), cur)} v ${g.name || m.gym_name || 'klubu'} bylo potřeba aspoň ${r.rule.pct} % a ${r.need} rezervací — příští platba (${when}) je v plné výši. V dalším období to jde znovu.`;
+          ? `🎯 Docházka splněná${who}: ${gotCs}. Další platba${plan} v ${g.name || m.gym_name || 'klubu'} (${when}) bude o ${fmt(r.amount, cur)} nižší: ${fmt(Math.max(0, (Number(m.amount) || 0) - r.amount), cur)} místo ${fmt(m.amount, cur)}.`
+          : `📊 Docházka${who}: ${gotCs}. Na slevu ${fmt(r.rule.amt * Math.max(1, parseInt(m.months, 10) || 1), cur)} v ${g.name || m.gym_name || 'klubu'} bylo potřeba ${reqCs} — příští platba (${when}) je v plné výši. V dalším období to jde znovu.`;
         const en = r.amount
-          ? `🎯 Attendance ${r.pct}%${who}: you attended ${r.attended} of ${r.reserved} booked sessions. Your next payment${plan} at ${g.name || m.gym_name || 'the club'} (${whenEn}) is ${fmt(r.amount, cur, true)} lower: ${fmt(Math.max(0, (Number(m.amount) || 0) - r.amount), cur, true)} instead of ${fmt(m.amount, cur, true)}.`
-          : `📊 Attendance ${r.pct}%${who}: you attended ${r.attended} of ${r.reserved} booked sessions. The ${fmt(r.rule.amt * Math.max(1, parseInt(m.months, 10) || 1), cur, true)} discount at ${g.name || m.gym_name || 'the club'} needed at least ${r.rule.pct}% and ${r.need} bookings — the next payment (${whenEn}) is in full. You can earn it next period.`;
-        if (!r.amount && !r.reserved) return;              // bez jediné rezervace nic neposílat
+          ? `🎯 Attendance target met${who}: ${gotEn}. Your next payment${plan} at ${g.name || m.gym_name || 'the club'} (${whenEn}) is ${fmt(r.amount, cur, true)} lower: ${fmt(Math.max(0, (Number(m.amount) || 0) - r.amount), cur, true)} instead of ${fmt(m.amount, cur, true)}.`
+          : `📊 Attendance${who}: ${gotEn}. The ${fmt(r.rule.amt * Math.max(1, parseInt(m.months, 10) || 1), cur, true)} discount at ${g.name || m.gym_name || 'the club'} needed ${reqEn} — the next payment (${whenEn}) is in full. You can earn it next period.`;
+        if (!r.amount && !r.expected && !r.visits) return;   // bez jediné proběhlé lekce nic neposílat
         await sb('notifications', { method: 'POST', body: JSON.stringify({ user_id: m.student_id, type: 'system', read: false, message: cs,
-          data: JSON.stringify({ kind: 'memb_att_disc', gym_id: m.gym_id, membership_id: m.id, amount: r.amount || 0, pct: r.pct, msg_cs: cs, msg_en: en }) }) });
+          data: JSON.stringify({ kind: 'memb_att_disc', gym_id: m.gym_id, membership_id: m.id, amount: r.amount || 0, visits: r.visits, absences: r.absences, msg_cs: cs, msg_en: en }) }) });
       };
       att = await attRenewalPass({ sbGet, sbPatch, stripe, notify });
     } catch (e) { console.error('att renewal pass', e.message); }

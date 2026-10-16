@@ -60,7 +60,10 @@ function dCz(date, time) {
 }
 
 async function loadAffected(gym, occ) {
-  const f = `gym_id=eq.${q(gym.id)}&class_date=eq.${q(occ.date)}&class_time=eq.${q(occ.time || '')}&class_name=eq.${q(occ.name || '')}`;
+  // Lekce bez názvu: rezervace ho mají jako NULL (zápis `name || null`), ne prázdný text.
+  // (Nové rozvrhy už prázdné názvy nemají -- _schedNorm / sql/schedule-normalize.sql.)
+  const f = `gym_id=eq.${q(gym.id)}&class_date=eq.${q(occ.date)}&class_time=eq.${q(occ.time || '')}`
+    + (occ.name ? `&class_name=eq.${q(occ.name)}` : '&or=(class_name.is.null,class_name.eq.)');
   const bookings = (await sb(`gym_bookings?${f}&status=in.(active,paid_claimed,reserved,pending)&select=*`)) || [];
   const resv = (await sb(`gym_class_reservations?${f}&select=id,student_id,student_name,child_name,status`)) || [];
   // Rezervace, které jsou jen držením místa k zaplacenému vstupu, se ukazují u vstupu, ne zvlášť.

@@ -902,7 +902,7 @@ export default async function handler(req, res) {
               const _ex = await stripe.invoiceItems.list({ customer: _cust, pending: true, limit: 20 }, { stripeAccount: event.account });
               if (!((_ex && _ex.data) || []).some((x) => x.metadata && x.metadata.mtl_att_disc && x.subscription === sub)) {
                 await stripe.invoiceItems.create({ customer: _cust, subscription: sub, currency: String(m.mtl_currency || 'czk').toLowerCase(), amount: -Math.round(Number(m.mtl_att_disc) * 100),
-                  description: `Sleva za docházku (${String(m.mtl_att_pct || '').replace('.', ',')} %)`, metadata: { mtl_att_disc: String(m.mtl_att_disc), mtl_att_pct: String(m.mtl_att_pct || ''), membership_id: m.membership_id || '' } },
+                  description: `Sleva za docházku${m.mtl_att_info ? ` (${m.mtl_att_info})` : ''}`, metadata: { mtl_att_disc: String(m.mtl_att_disc), mtl_att_info: String(m.mtl_att_info || ''), membership_id: m.membership_id || '' } },
                   { stripeAccount: event.account });
               }
             } catch (e) { console.error('att disc next', e.message); }

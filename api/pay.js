@@ -589,7 +589,7 @@ async function membershipCheckout(req, res) {
     // Člen JEN z řádku členství (ten zakládá appka za přihlášeného), ne z adresy -- jinak by si
     // kdokoli vzal slevu za cizí docházku. Řádek musí ještě čekat na platbu.
     const _mrA = membershipId ? (((await _wsbGet(`gym_memberships?id=eq.${encodeURIComponent(membershipId)}&select=student_id,child_name,gym_id,status`)) || [])[0] || null) : null;
-    const _gA = (_mrA && _mrA.status === 'pending' && _mrA.gym_id) ? (((await _wsbGet(`gyms?id=eq.${encodeURIComponent(_mrA.gym_id)}&select=id,membership_plans,currency`)) || [])[0] || null) : null;
+    const _gA = (_mrA && _mrA.status === 'pending' && _mrA.gym_id) ? (((await _wsbGet(`gyms?id=eq.${encodeURIComponent(_mrA.gym_id)}&select=id,membership_plans,currency,schedule`)) || [])[0] || null) : null;
     const _r = _gA ? await attDiscForPurchase(_wsbGet, { gym: _gA, studentId: _mrA.student_id, childName: _mrA.child_name || null, newMonths: _moQ, price: P, excludeId: membershipId }) : null;
     if (_r && _r.ok && _r.amount > 0) _att = _r;
   } catch (e) { console.error('att disc', e.message); }
@@ -646,7 +646,7 @@ async function membershipCheckout(req, res) {
       mtl_base: String(P - _D1),
       mtl_currency: cur,
       member_name: memberName || '',
-      ...(_D1 ? { mtl_att_disc: String(_D1), mtl_att_pct: String(_att.pct) } : {}),
+      ...(_D1 ? { mtl_att_disc: String(_D1), mtl_att_info: _att.summary } : {}),
     };
     const _s1 = await stripe.checkout.sessions.create(
       {
@@ -700,7 +700,7 @@ async function membershipCheckout(req, res) {
         const _cp = await stripe.coupons.create({ amount_off: Math.round(_D2 * 100), currency: cur, duration: 'once', max_redemptions: 1, name: 'Sleva za docházku' }, { stripeAccount: gymAccount });
         _discounts = [{ coupon: _cp.id }];
       }
-      _attMeta = { mtl_att_disc: String(_D2), mtl_att_pct: String(_att.pct), mtl_att_mode: _firstNow > 0 ? 'coupon' : 'next' };
+      _attMeta = { mtl_att_disc: String(_D2), mtl_att_info: _att.summary, mtl_att_mode: _firstNow > 0 ? 'coupon' : 'next' };
       if (membershipId) await _wsbPatch(`gym_memberships?id=eq.${encodeURIComponent(membershipId)}`, { att_disc: _D2, att_disc_from: _att.prevId, att_disc_for: _att.prevEnd });
     }
   }
@@ -780,7 +780,7 @@ async function attDiscInfo(req, res) {
     const row = ((await _wsbGet(`gym_memberships?id=eq.${encodeURIComponent(String(q0.membershipId || ''))}&select=*`)) || [])[0];
     if (!row || !row.gym_id) return res.status(404).json({ error: 'not found' });
     if (row.student_id !== user.id && row.paid_by !== user.id && !(await staffOf(row.gym_id))) return res.status(403).json({ error: 'forbidden' });
-    const g = ((await _wsbGet(`gyms?id=eq.${encodeURIComponent(row.gym_id)}&select=id,membership_plans,currency`)) || [])[0];
+    const g = ((await _wsbGet(`gyms?id=eq.${encodeURIComponent(row.gym_id)}&select=id,membership_plans,currency,schedule`)) || [])[0];
     const pr = g ? await attProgress(_wsbGet, { gym: g, row }) : null;
     const next = (row.att_eval_for && row.period_end && Date.parse(row.att_eval_for) === Date.parse(row.period_end)) ? (Number(row.att_disc_next) || 0) : null;
     return res.status(200).json({ ok: true, progress: pr, next, currency: row.currency || (g && g.currency) || 'CZK' });
@@ -792,11 +792,11 @@ async function attDiscInfo(req, res) {
     const pb = (await _wsbGet(`gym_memberships?gym_id=eq.${encodeURIComponent(gymId)}&student_id=eq.${encodeURIComponent(member)}&paid_by=eq.${encodeURIComponent(user.id)}&select=id&limit=1`)) || [];
     if (!pb.length) return res.status(403).json({ error: 'forbidden' });
   }
-  const g = ((await _wsbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=id,membership_plans,currency`)) || [])[0];
+  const g = ((await _wsbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=id,membership_plans,currency,schedule`)) || [])[0];
   if (!g) return res.status(404).json({ error: 'gym not found' });
   const r = await attDiscForPurchase(_wsbGet, { gym: g, studentId: member, childName: q0.child ? String(q0.child) : null,
     newMonths: q0.months, price: Number(q0.price) || 0, excludeId: q0.excludeId ? String(q0.excludeId) : null });
-  return res.status(200).json({ ok: true, disc: r ? { ok: r.ok, amount: r.amount, would: r.would, pct: r.pct, reserved: r.reserved, attended: r.attended, need: r.need, rulePct: r.rule.pct, prevId: r.prevId, prevEnd: r.prevEnd, plan: r.plan } : null, currency: g.currency || 'CZK' });
+  return res.status(200).json({ ok: true, disc: r ? { ok: r.ok, amount: r.amount, would: r.would, visits: r.visits, absences: r.absences, needVisits: r.needVisits, allowAbs: r.allowAbs, summary: r.summary, prevId: r.prevId, prevEnd: r.prevEnd, plan: r.plan } : null, currency: g.currency || 'CZK' });
 }
 // 2026-09-30 -> 30. 9. 2026 (do názvu položky ve Stripe).
 function _dmy(ymd) { const [y, m, d] = String(ymd || '').slice(0, 10).split('-').map(Number); return (y && m && d) ? `${d}. ${m}. ${y}` : String(ymd || ''); }
