@@ -961,7 +961,7 @@ export default async function handler(req, res) {
           // NOTE follow-up: ambassador 0.5% on cohort deposits not wired yet (needs mtl_disc/mtl_base in metadata).
           try {
             const coh = cohId ? ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=owner_id,name,gym_id,deposit_amount,price_student,price_regular,currency,start_date,gym_meta_pixel,capi_token`)) || [])[0] : null;
-            const mem = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=name,email,tier,fbp,fbc,student_id`)) || [])[0];
+            const mem = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=name,email,tier,fbp,fbc,student_id,consents`)) || [])[0];
             if (coh && coh.owner_id) await sbPost('notifications', { user_id: coh.owner_id, type: 'system', read: false, data: JSON.stringify({ kind: 'cohort_deposit_paid', cohort_id: cohId || null, cohort_member_id: cmId || null, cohort_name: coh.name || '', msg_en: '\uD83D\uDCDA New paid course enrolment' + (coh.name ? (' "' + coh.name + '"') : '') + '.' }), message: '\uD83D\uDCDA Nov\u00FD zaplacen\u00FD z\u00E1pis do kurzu' + (coh.name ? (' "' + coh.name + '"') : '') + '.' });
             // In-app notification to the student too (match the accountless member by e-mail to a profile).
             try {
@@ -994,7 +994,8 @@ export default async function handler(req, res) {
               } catch (e) { console.error('cohort doklad pdf', e.message); }
               await sendResend(_toMail, (coh.name || 'Kurz') + ' \u2014 z\u00E1loha p\u0159ijata', cohortDepositHtml(mem.name, coh.name || 'Kurz', gymName, money(amount), remainder > 0 ? money(remainder) : '', coh.start_date || '', (APP_URL + '/?myclass=' + encodeURIComponent(cmId)), !!(gymRec && gymRec.org_form === 'nonprofit')), { from: '"' + fromName + '" <' + MAIL_ADDR + '>', replyTo: ownerEmail || undefined, attachments: _dokAtt });
             }
-            try { await cohortCapiPurchase(coh, cmId, (mem && mem.email) || '', amount, cur, (mem && mem.fbp) || '', (mem && mem.fbc) || ''); } catch (e) {}
+            // Konverze do pixelu poskytovatele jen se souhlasem, který člověk dal v přihlášce (nepovinné zaškrtávátko).
+            if (mem && mem.consents && mem.consents.marketing === true) { try { await cohortCapiPurchase(coh, cmId, mem.email || '', amount, cur, mem.fbp || '', mem.fbc || ''); } catch (e) {} }
           } catch (e) { console.error('cohort confirm', e.message); }
         }
       } else if (m.mtl_payment_type === 'cohort_first_month') {

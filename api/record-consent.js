@@ -26,6 +26,19 @@ async function sb(path, opts = {}) {
   return j;
 }
 
+// KDO SOUHLASÍ = přihlášený uživatel z tokenu. Dřív se user_id bralo z těla požadavku a kdokoli
+// mohl zapsat souhlas za kohokoli jiného.
+async function whoami(req) {
+  const tok = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+  if (!tok) return null;
+  try {
+    const r = await fetch(`${SB}/auth/v1/user`, { headers: { apikey: KEY, Authorization: `Bearer ${tok}` } });
+    if (!r.ok) return null;
+    const u = await r.json();
+    return (u && u.id) ? u.id : null;
+  } catch (e) { return null; }
+}
+
 function sha256(s) { return crypto.createHash('sha256').update(String(s || ''), 'utf8').digest('hex'); }
 
 function clientIp(req) {
@@ -38,9 +51,16 @@ export default async function handler(req, res) {
   try {
     let body = req.body;
     if (typeof body === 'string') { try { body = JSON.parse(body); } catch (e) { body = {}; } }
-    const { user_id, kind, version, lang, body_text, meta, scope, shown } = body || {};
-    if (!user_id || !kind || version == null || !body_text) {
-      return res.status(400).json({ error: 'user_id, kind, version, body_text required' });
+    const user_id = await whoami(req);
+    if (!user_id) return res.status(401).json({ error: 'no token' });
+    const { kind, version, lang, body_text, meta, scope, shown } = body || {};
+    if (!kind || version == null || !body_text) {
+      return res.status(400).json({ error: 'kind, version, body_text required' });
+    }
+    // Rozumné meze (znění dokumentu je dlouhé, ale ne neomezené).
+    if (String(kind).length > 60 || String(version).length > 40 || String(lang || '').length > 8 || String(scope || '').length > 120
+        || String(body_text).length > 200000 || JSON.stringify(meta || {}).length > 20000) {
+      return res.status(413).json({ error: 'too long' });
     }
     const _lang = lang || 'cs';
     const _scope = (scope == null || scope === '') ? null : String(scope);

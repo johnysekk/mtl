@@ -3,11 +3,14 @@
 // them = no double counting. Each cohort carries its OWN pixel id (gym_meta_pixel) and a
 // secret CAPI token (capi_token) — the token NEVER leaves the server.
 //
-// POST body: { cohort_id, event, event_id, email, phone, fbp, fbc, value, currency, event_source_url }
-//   event = 'Lead' | 'Purchase' (defaults to 'Lead')
+// POST body: Lead     { cohort_id, event:'Lead', event_id, email, phone, fbp, fbc, event_source_url, consent:true }
+//            Purchase { cohort_id, event:'Purchase', cohort_member_id }
 //
-// Consent: the client only calls this after the lead ticked the consent box (and, for Purchase,
-// after a real payment). The provider is the controller for their own pixel; MTL is the conduit.
+// SOUHLAS. Lead posílá přihláška jen se zaškrtnutým marketingovým souhlasem (consent:true, bez
+// něj se nic neodešle). Purchase si server ověří sám: přihláška musí patřit ke kurzu, mít v sobě
+// marketingový souhlas a zaplacenou zálohu -- e-mail, telefon a fbp/fbc se berou z ní, ne z těla
+// požadavku (jinak by kdokoli mohl posílat cizí údaje do pixelu poskytovatele).
+// Správcem pixelu je poskytovatel; MTL je jen zprostředkovatel.
 
 import crypto from 'crypto';
 
@@ -52,7 +55,16 @@ export default async function handler(req, res) {
     const event_name = (b.event === 'Purchase') ? 'Purchase' : 'Lead';
 
     // Look up this cohort's own pixel + secret token (server-side only).
-    const rows = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohortId)}&select=gym_meta_pixel,capi_token,currency`);
+    let mem = null;
+    if (event_name === 'Purchase') {
+      if (!b.cohort_member_id) return res.status(400).json({ ok: false, error: 'missing cohort_member_id' });
+      mem = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(b.cohort_member_id)}&select=cohort_id,email,phone,fbp,fbc,consents,paid_amount`)) || [])[0] || null;
+      if (!mem || String(mem.cohort_id) !== String(cohortId) || !(Number(mem.paid_amount) > 0) || !(mem.consents && mem.consents.marketing === true))
+        return res.status(200).json({ ok: true, relayed: false });
+    } else if (b.consent !== true) {
+      return res.status(200).json({ ok: true, relayed: false });
+    }
+    const rows = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohortId)}&select=gym_meta_pixel,capi_token,currency,deposit_amount`);
     const c = rows && rows[0];
     if (!c || !c.gym_meta_pixel || !c.capi_token) {
       // No CAPI configured for this cohort — nothing to relay, not an error.
@@ -63,25 +75,26 @@ export default async function handler(req, res) {
              || (req.socket && req.socket.remoteAddress) || '';
     const ua = req.headers['user-agent'] || '';
 
+    const src = mem || b;
     const user_data = {};
-    if (b.email) user_data.em = [sha256(b.email)];
-    if (b.phone) user_data.ph = [sha256Phone(b.phone)];
-    if (b.fbp) user_data.fbp = b.fbp;
-    if (b.fbc) user_data.fbc = b.fbc;
+    if (src.email) user_data.em = [sha256(src.email)];
+    if (src.phone) user_data.ph = [sha256Phone(src.phone)];
+    if (src.fbp) user_data.fbp = src.fbp;
+    if (src.fbc) user_data.fbc = src.fbc;
     if (ip) user_data.client_ip_address = ip;
     if (ua) user_data.client_user_agent = ua;
 
     const custom_data = {};
     if (event_name === 'Purchase') {
-      custom_data.value = Number(b.value || 0);
-      custom_data.currency = (b.currency || c.currency || 'CZK');
+      custom_data.value = Number(c.deposit_amount || 0);
+      custom_data.currency = c.currency || 'CZK';
     }
 
     const evt = {
       event_name,
       event_time: Math.floor(Date.now() / 1000),
       action_source: 'website',
-      event_id: b.event_id || (event_name.toLowerCase() + '_' + cohortId + '_' + Date.now()),
+      event_id: mem ? ('cp_' + b.cohort_member_id) : (b.event_id || ('lead_' + cohortId + '_' + Date.now())),
       user_data,
     };
     if (b.event_source_url) evt.event_source_url = b.event_source_url;
