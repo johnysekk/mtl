@@ -8,7 +8,6 @@
 //   1:1 lekce (coach + student) řeší tenhle cron přes profiles.timezone (TZ kouče) + client-side fallback. Respektuje mute_class_reminder / mute_coach_lesson_reminder.
 
 import Stripe from 'stripe';
-import { ladderRate as _mtlLadder } from './_rate.js';
 import { feeRefundableForPI } from './_fee-window.js';
 
 const FOUNDER_ID = (process.env.FOUNDER_UUID || '').trim();
@@ -310,7 +309,7 @@ async function handler(req, res) {
         const pk = await sbPatch('profiles', `id=eq.${pr.id}`, {
           name: 'Smazaný uživatel', photo_url: null, bio: null, emoji: null,
           phone: null, contact_phone: null, contact_email: null, billing_phone: null, invoice_email: null,
-          health_note: null, guardian_email: null, guardian_name: null, guardian_phone: null,
+          health_note: null, health_share: [], health_consent_at: null, guardian_email: null, guardian_name: null, guardian_phone: null,
           children: null, coach_status: 'deleted', purged_at: new Date().toISOString(),
         });
         if (!pk.ok) { console.error('purge profile', pr.id, pk.status); continue; }
