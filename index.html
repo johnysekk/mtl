@@ -1960,8 +1960,6 @@ input[type="date"]::-webkit-date-and-time-value{ text-align:left; }
   <div class="shdr"><div class="shdr-title" id="csSchedTitle">📅 Moje lekce</div><button class="btn-close" id="btnCloseCsSched">✕</button></div>
   <div style="padding:18px 20px 44px;">
     <div id="coachSchedList"></div>
-    <button id="coachSchedAdd" style="width:100%;padding:11px;background:transparent;color:var(--dark);border:1.5px dashed var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:14px;">+ Přidat lekci</button>
-    <button id="coachSchedSave" style="width:100%;padding:14px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';">Uložit</button>
   </div>
 </div>
 
@@ -9245,7 +9243,8 @@ function _gymHasOffer(e){
     const t=new Date().toISOString().slice(0,10);
     return (sc||[]).some(function(c){ if(!c) return false; if(c.until && c.until<t) return false;
       if(c.once) return !!(c.date && c.date>=t);
-      const sl=(typeof _classSlots==='function')?_classSlots(c):[]; return (sl&&sl.length>0) || (c.day!=null && c.time); });
+      // Jen termíny (_classSlots si starý tvar bez slots převede sám); zbytek day/time vedle prázdných slots nic nenabízí.
+      const sl=(typeof _classSlots==='function')?_classSlots(c):[]; return !!(sl&&sl.length>0); });
   }catch(e){ return true; }
 }
 function _sellMissing(e, kind){
@@ -17096,13 +17095,17 @@ async function _attDiscFetch(g, plan, child, memberId, price){
     const j=await r.json(); return (j && j.ok && j.disc) ? j.disc : null;
   }catch(e){ return null; }
 }
-function _attDiscLine(d, cur, EN){
+// Shrnutí pro texty: „8 tréninků, 1 absence" (bez procent).
+function _attGot(d, EN){
   if(!d) return '';
-  const pct=String(d.pct).replace('.', EN?'.':',');
-  return d.ok
-    ? (EN?('\n\n🎯 Attendance discount: −'+fmtPrice(d.amount,cur)+' '+_curSym(cur)+' (you attended '+d.attended+' of '+d.reserved+' booked sessions, '+pct+' %).')
-         :('\n\n🎯 Sleva za docházku: −'+fmtPrice(d.amount,cur)+' '+_curSym(cur)+' (z '+d.reserved+' rezervovaných tréninků jsi odchodil(a) '+d.attended+', '+pct+' %).'))
-    : '';
+  const v=Number(d.visits)||0, a=Number(d.absences)||0;
+  return EN ? (v+' session'+(v===1?'':'s')+', '+a+' absence'+(a===1?'':'s'))
+            : (v+'× trénink, '+a+' '+(a===1?'absence':(a>=2&&a<=4?'absence':'absencí')));
+}
+function _attDiscLine(d, cur, EN){
+  if(!d || !d.ok) return '';
+  return EN?('\n\n🎯 Attendance discount: −'+fmtPrice(d.amount,cur)+' '+_curSym(cur)+' (last period: '+_attGot(d,true)+').')
+           :('\n\n🎯 Sleva za docházku: −'+fmtPrice(d.amount,cur)+' '+_curSym(cur)+' (minulé období: '+_attGot(d,false)+').');
 }
 async function subscribeGymMembership(g, plan, _child, _cleared){
   // Přihláška za člena: u dětského členství až po výběru dítěte a ZA DÍTĚ (viz níž).
@@ -17425,32 +17428,33 @@ async function bookGymDropin(g, occ, _child){
 // SLEVA ZA DOCHÁZKU u permanentky: má ji plán zapnutou? (gyms.membership_plans[].att, api/_att-disc.js)
 function _membAttOn(g, m){
   try{ if(!g || !m || !m.plan_name) return false; const pl=(typeof g.membership_plans==='string')?JSON.parse(g.membership_plans||'[]'):(g.membership_plans||[]);
-    const p=(pl||[]).find(function(x){ return x && String(x.name||'').trim()===String(m.plan_name).trim(); }); return !!(p && p.att && p.att.on && Number(p.att.amt)>0); }catch(e){ return false; }
+    const p=(pl||[]).find(function(x){ return x && String(x.name||'').trim()===String(m.plan_name).trim(); }); return !!(p && p.att && p.att.on && Number(p.att.amt)>0 && (p.att.maxAbs!=null || Number(p.att.minVisits)>0)); }catch(e){ return false; }
 }
 // Průběh docházky v běžícím období + co z ní plyne (ze serveru, stejný výpočet jako při platbě).
+// Dvě celá čísla: tréninky „6 z 8" a absence „1 z 2" -- žádná procenta.
 async function _membAttPaint(el, mid){
   const EN=LANG==='en';
   try{
     const r=await fetch('/api/pay?type=att_disc&progress=1&membershipId='+encodeURIComponent(mid), { headers:{ Authorization:'Bearer '+((await _freshTok())||'') } });
     const j=await r.json(); if(!j || !j.ok || !j.progress) return;
-    const p=j.progress, cur=j.currency||'CZK', sym=_curSym(cur), R=p.rule;
-    const pctS=String(p.pct).replace('.', EN?'.':','), until=new Date(p.until).toLocaleDateString(EN?'en-GB':'cs-CZ');
-    const w=Math.max(0, Math.min(100, p.pct)), goal=R.pct;
+    const p=j.progress, cur=j.currency||'CZK', sym=_curSym(cur);
+    const until=new Date(p.until).toLocaleDateString(EN?'en-GB':'cs-CZ');
+    const chip=function(lbl, val, good){ return '<div style="flex:1;background:'+(good?'#E8F5EE':'var(--surf)')+';border:1px solid '+(good?'#A8E6C0':'var(--border)')+';border-radius:10px;padding:7px 9px;">'
+      +'<div style="font-size:10.5px;color:var(--mid);font-weight:700;">'+lbl+'</div><div style="font-size:15px;font-weight:800;color:'+(good?'#067647':'var(--dark)')+';">'+val+'</div></div>'; };
+    let chips='';
+    if(p.needVisits!=null) chips+=chip(EN?'Sessions':'Tréninky', p.visits+' / '+p.needVisits, p.visits>=p.needVisits);
+    if(p.allowAbs!=null) chips+=chip(EN?'Absences (max)':'Absence (nejvýš)', p.absences+' / '+p.allowAbs, p.absences<=p.allowAbs);
+    const req=[p.needVisits!=null?(EN?('at least '+p.needVisits+' sessions'):('aspoň '+p.needVisits+'× trénink')):'', p.allowAbs!=null?(EN?('at most '+p.allowAbs+' absences'):('nejvýš '+p.allowAbs+' '+((p.allowAbs>=1&&p.allowAbs<=4)?'absence':'absencí'))):''].filter(Boolean).join(EN?' and ':' a ');
     let msg;
     if(j.next!=null && j.next>0) msg=EN?('✅ Done — your next payment is '+fmtPrice(j.next,cur)+' '+sym+' lower.'):('✅ Splněno — další platba bude o '+fmtPrice(j.next,cur)+' '+sym+' nižší.');
     else if(j.next===0) msg=EN?'This period did not reach the discount; the next one starts fresh.':'V tomhle období na slevu nedosáhlo; v dalším to jde znovu.';
-    else {
-      const left=Math.max(0, p.need-p.reserved);
-      msg=(EN?('Discount '+fmtPrice(p.amount,cur)+' '+sym+' on the next period from '+goal+' % attendance'):('Sleva '+fmtPrice(p.amount,cur)+' '+sym+' na další období od '+goal+' % docházky'))
-        +(R.min?(EN?(' and '+p.need+' bookings'):(' a '+p.need+' rezervací')):'')
-        +(EN?(' · counts classes until '+until):(' · počítají se lekce do '+until))
-        +(left?(EN?(' · '+left+' more bookings needed'):(' · chybí ještě '+left+' rezervací')):'');
-    }
+    else msg=(EN?('Discount '+fmtPrice(p.amount,cur)+' '+sym+' on the next period for '+req+' · counts classes until '+until)
+                :('Sleva '+fmtPrice(p.amount,cur)+' '+sym+' na další období za '+req+' · počítají se lekce do '+until));
     el.innerHTML='<div style="background:#fff;border:1px solid var(--border);border-radius:11px;padding:9px 11px;">'
-      +'<div style="display:flex;justify-content:space-between;font-size:12.5px;font-weight:800;color:var(--dark);margin-bottom:5px;"><span>🎯 '+(EN?'Attendance':'Docházka')+' '+p.attended+'/'+p.reserved+'</span><span style="color:'+(p.ok?'#067647':'var(--mid)')+';">'+pctS+' %</span></div>'
-      +'<div style="position:relative;height:7px;background:#EFECE7;border-radius:5px;overflow:hidden;"><div style="height:100%;width:'+w+'%;background:'+(p.ok?'#0a8f5b':'#E8C24A')+';"></div><div style="position:absolute;top:0;bottom:0;left:'+goal+'%;width:2px;background:var(--dark);opacity:.5;"></div></div>'
-      +'<div style="font-size:11.5px;color:var(--mid);line-height:1.45;margin-top:6px;">'+msg+'</div>'
-      +'<div style="font-size:10.5px;color:var(--light);line-height:1.4;margin-top:3px;">'+(EN?'Counted from your bookings and the attendance your coach records. An excused class counts as missed.':'Počítá se z tvých rezervací a docházky, kterou zapisuje kouč. Omluvená lekce je absence.')+'</div>'
+      +'<div style="font-size:12.5px;font-weight:800;color:var(--dark);margin-bottom:6px;">🎯 '+(EN?'Attendance discount':'Sleva za docházku')+'</div>'
+      +'<div style="display:flex;gap:8px;">'+chips+'</div>'
+      +'<div style="font-size:11.5px;color:var(--mid);line-height:1.45;margin-top:7px;">'+msg+'</div>'
+      +'<div style="font-size:10.5px;color:var(--light);line-height:1.4;margin-top:3px;">'+(EN?'Absence = a class of your pass that took place and you were not marked present (an excused class too). Attendance is recorded by the club.':'Absence = proběhlá lekce tvé permanentky, na které nemáš zapsanou docházku (i omluvená). Docházku zapisuje klub.')+'</div>'
       +'</div>';
   }catch(e){}
 }
@@ -18755,6 +18759,49 @@ function _classSlots(c){
   return c.slots.filter(function(s){ return s && s.day!=null && s.time; })
     .map(function(s){ return { day:Number(s.day), time:s.time, dur:(s.dur!=null?Number(s.dur):_cd) }; });
 }
+// JEDINÝ TVAR, KTERÝ SE DO gyms.schedule ZAPISUJE (sjednoceno 16. 10. 2026). Každé uložení rozvrhu
+// (Rozvrh majitele, rozvrh trenéra, Nastavení klubu) jde přes tohle:
+//   * opakovaná lekce: termíny JEN v `slots`; staré day / time / extraSlots / date pryč -- vedle
+//     slots by zestárly a četl by se z nich špatný čas;
+//   * jednorázová lekce (once): date + time, bez slots / day / extraSlots;
+//   * prázdný název = název úrovně, VŽDY česky (ne podle jazyka appky): název je klíč rezervací,
+//     docházky, zrušených termínů i permanentek na vybrané lekce a nesmí se měnit podle toho,
+//     kdo a v jakém jazyce rozvrh uložil.
+function _schedLvlName(level){
+  const o=(typeof CLASS_LEVELS!=='undefined'?CLASS_LEVELS:[]).find(function(x){ return x.v===level; });
+  return o ? o.cs : ((level && level!=='all') ? String(level) : 'Všichni');
+}
+function _schedNorm(c){
+  if(!c) return c;
+  const out=Object.assign({}, c);
+  out.name=(c.name && String(c.name).trim()) ? String(c.name).trim() : _schedLvlName(c.level||'all');
+  if(c.once){ delete out.slots; delete out.day; delete out.extraSlots; }
+  else {
+    out.slots=_classSlots(c).map(function(x){ return { day:Number(x.day), time:x.time, dur:Number(x.dur)||60 }; });
+    delete out.day; delete out.time; delete out.extraSlots; delete out.date;
+  }
+  return out;
+}
+function _schedNormAll(arr){ return (arr||[]).filter(Boolean).map(_schedNorm); }
+// Jednorázová lekce -> opakovaná: z data a času udělá první termín ve `slots`, staré day/time/date pryč.
+function _toRecurring(it){
+  if(!it) return;
+  const _d=it.date?new Date(String(it.date).slice(0,10)+'T12:00:00').getDay():(it.day!=null?Number(it.day):null);
+  const _sl=Array.isArray(it.slots)?it.slots.slice():[];
+  if(!_sl.length && _d!=null && it.time) _sl.push({ day:_d, time:it.time, dur:Number(it.dur)||60 });
+  it.once=false; it.slots=_sl; delete it.date; delete it.day; delete it.time; delete it.extraSlots;
+}
+// Kdy lekce je, pro texty: jednorázová „20. 10. 10:00", opakovaná „Po 18:00, St 18:00" (z termínů).
+function _clsWhen(c){
+  try{ if(!c) return '';
+    if(c.once) return (c.date?_dt(c.date)+' ':'')+(c.time||'');
+    const _dn=(typeof dowShort==='function')?dowShort():['Ne','Po','Út','St','Čt','Pá','So'];
+    return _classSlots(c).map(function(x){ return _dn[x.day]+' '+x.time; }).join(', ');
+  }catch(e){ return ''; }
+}
+// Výsledek zpátky do pole, které editor drží (bez nového pole -- _csSched a _gymSchedule u trenéra
+// sdílí totéž pole a nové by je rozpojilo).
+function _schedReplaceInPlace(arr, list){ arr.length=0; (list||[]).forEach(function(x){ arr.push(x); }); return arr; }
 function upcomingClasses(schedule, days, backDays){
   days = days||7; backDays = backDays||0; const out=[]; const now=new Date();
   for(let d=-backDays; d<days; d++){
@@ -18766,7 +18813,7 @@ function upcomingClasses(schedule, days, backDays){
       const _emit=(TIME,DUR)=>{
         if(d===0 && !backDays){ const [h,mi]=String(TIME||'00:00').split(':').map(Number); const ct=new Date(date); ct.setHours(h||0,mi||0,0,0); if(ct<now) return; }
         const _ovK=_ld+'|'+(TIME||'')+'|'+(c.name||''); const _ovR=(typeof window!=='undefined'&&window._occOverride&&window._occOverride[_ovK])||null;
-        out.push({ name:c.name, cap:(c.cap!=null?Number(c.cap):null), cancelled:!!(typeof window!=='undefined'&&window._cancelledOcc&&window._cancelledOcc.has(_ld+'|'+(TIME||'')+'|'+(c.name||''))), date:_ld, time:TIME, dur:Number(DUR)||60, level:c.level||'all', coach:(_ovR?_ovR.coach:(c.coach||null)), coachName:(_ovR?_ovR.coachName:(c.coachName||null)), leader:(_ovR?_ovR.leader:((c.leader||c.coach)||null)), leaderName:(_ovR?_ovR.leaderName:((c.leaderName||c.coachName)||null)), disc:c.disc||null, kids:((!!c.kids)||(c.level==='kids')), ageMin:(c.ageMin!=null?c.ageMin:null), ageMax:(c.ageMax!=null?c.ageMax:null), parentReq:!!c.parentReq, altPlace:(c.altPlace||null), altAddr:(c.altAddr||null), once:!!c.once, memb:(c.once?(c.memb===true):undefined) });
+        out.push({ name:c.name, cap:(c.cap!=null?Number(c.cap):null), cancelled:!!(typeof window!=='undefined'&&window._cancelledOcc&&window._cancelledOcc.has(_ld+'|'+(TIME||'')+'|'+(c.name||''))), date:_ld, time:TIME, dur:Number(DUR)||60, level:c.level||'all', coach:(_ovR?_ovR.coach:(c.coach||null)), coachName:(_ovR?_ovR.coachName:(c.coachName||null)), leader:(_ovR?_ovR.leader:((c.leader||c.coach)||null)), leaderName:(_ovR?_ovR.leaderName:((c.leaderName||c.coachName)||null)), disc:c.disc||null, kids:((!!c.kids)||(c.level==='kids')), ageMin:(c.ageMin!=null?c.ageMin:null), ageMax:(c.ageMax!=null?c.ageMax:null), parentReq:!!c.parentReq, altPlace:(c.altPlace||null), altAddr:(c.altAddr||null), once:!!c.once, memb:(c.once?(c.memb===true):undefined), ckey:_clsKey(c) });
       };
       if(c.once){ if(c.date===_ld) _emit(c.time, c.dur); return; }
       if((c.since && _ld<c.since) || (c.until && _ld>c.until)) return;
@@ -19399,7 +19446,7 @@ async function openTeamCoachStats(coachId, coachName){
     box.innerHTML='<p style="color:var(--red);font-size:13px;padding:8px 0;">'+((e&&e.message)||e)+'</p>';
   }
 }
-var _csGymId=null, _csGym=null, _csSched=[], _csView='mine', _csFullSched=[], _csTeamSlots={};
+var _csGymId=null, _csGym=null, _csSched=[];
 let _cpDropin='', _cpCurrency='CZK', _cpPlans=[], _cpStatus=null, _cpReason=null, _cpAutonomy=false;
 let _cprGymId=null;
 async function openCoachPricingRequests(gymId){
@@ -19521,7 +19568,6 @@ async function openCoachScheduleEditor(gymId, gymName, readOnly){ window._csRead
     _csSched = (sch||[]).filter(function(c){ return c && c.coach===currentUser.id; });
     _gymSchedule = _csSched;
     window._csEditGym = g || { id: gymId };
-    _csFullSched = []; (sch||[]).forEach(function(c){ _classSlots(c).forEach(function(sl){ _csFullSched.push({ day:Number(sl.day)||0, time:sl.time||'18:00', name:c.name||'', level:c.level||'all', dur:Number(sl.dur!=null?sl.dur:c.dur)||60, coach:(c.leader||c.coach)||null, coachName:(c.leaderName||c.coachName)||null }); }); }); _csView=window._csReadOnly?'full':'mine';
     const sym=_curSym(_csGym&&_csGym.currency);
     // Loaded BEFORE the banner is written. It used to be read here while still holding whatever
     // the previous render had left in it, and was only fetched eleven lines further down -- so an
@@ -19550,7 +19596,6 @@ async function openCoachScheduleEditor(gymId, gymName, readOnly){ window._csRead
       if(_gp) _gp.onclick=function(){ openSheet('shCsPrices'); };
     }catch(e){}
     renderScheduleEditor();
-    loadCsTeamSlots(gymId);
     try{ const { data: cp } = await supaClient.from('gym_coach_pricing').select('*').eq('gym_id', gymId).eq('coach_id', currentUser.id).maybeSingle(); if(cp){ _cpDropin=cp.dropin_price||''; _cpCurrency=cp.currency||(_csGym&&_csGym.currency)||'CZK'; try{ _cpPlans=(typeof cp.plans==='string'?JSON.parse(cp.plans):cp.plans)||[]; }catch(e){ _cpPlans=[]; } _cpStatus=cp.status||null; _cpReason=cp.reason||null; } else { _cpDropin=''; _cpCurrency=(_csGym&&_csGym.currency)||'CZK'; _cpPlans=[]; _cpStatus=null; _cpReason=null; } }catch(e){ _cpDropin=''; _cpPlans=[]; _cpStatus=null; }
     // ONLY an autonomous coach sets prices - and they never ask. A non-autonomous coach
     // teaches the GYM's classes at the GYM's prices, so a "propose your prices and wait for
@@ -19558,108 +19603,8 @@ async function openCoachScheduleEditor(gymId, gymName, readOnly){ window._csRead
     if(!window._csReadOnly && _cpAutonomy) renderCpEditor();
   }catch(e){ console.error('openCoachScheduleEditor',e); toast('⚠️ '+e.message); }
 }
-async function loadCsTeamSlots(gymId){
-  _csTeamSlots={};
-  try{
-    const res=await supaClient.from('gym_coaches').select('coach_id').eq('gym_id',gymId).eq('status','active').eq('share_availability',true);
-    if(res.error) return;
-    const ids=(res.data||[]).map(r=>r.coach_id).filter(id=>id && id!==currentUser.id);
-    if(!ids.length) return;
-    const { data:profs } = await supaClient.from('profiles').select('id,name').in('id',ids);
-    const nm={}; (profs||[]).forEach(pp=>nm[pp.id]=pp.name||'');
-    const t0=new Date(); const ymdToday=`${t0.getFullYear()}-${String(t0.getMonth()+1).padStart(2,'0')}-${String(t0.getDate()).padStart(2,'0')}`;
-    const t1=new Date(t0.getTime()+8*86400000); const ymdEnd=`${t1.getFullYear()}-${String(t1.getMonth()+1).padStart(2,'0')}-${String(t1.getDate()).padStart(2,'0')}`;
-    const { data:sl } = await supaClient.from('slots').select('coach_profile_id,date,time,discipline,booked').in('coach_profile_id',ids).gte('date',ymdToday).lte('date',ymdEnd).eq('booked',false);
-    (sl||[]).forEach(s2=>{ const d=s2.date; if(!d) return; (_csTeamSlots[d]=_csTeamSlots[d]||[]).push({ coachId:s2.coach_profile_id, coachName:nm[s2.coach_profile_id]||'', time:s2.time||'', end:s2.end_time||'', disc:s2.discipline||'' }); });
-    Object.keys(_csTeamSlots).forEach(d=>_csTeamSlots[d].sort((a,b)=>String(a.time).localeCompare(String(b.time))));
-    if(_csView==='full') renderScheduleEditor();
-  }catch(e){}
-}
 async function toggleShareAvail(rowId, on){
   try{ const { error }=await supaClient.from('gym_coaches').update({ share_availability:on }).eq('id',rowId); if(error){ toast('⚠️ '+error.message); return; } toast(on?(LANG==='en'?'✅ Sharing your 1:1 availability with the team':'✅ Sdílíš svou 1:1 dostupnost s týmem'):(LANG==='en'?'Availability sharing off':'Sdílení dostupnosti vypnuto')); loadMyTeams(); }catch(e){ toast('⚠️ '+e.message); }
-}
-function renderCoachSchedEditor(){
-  const box=$('coachSchedList'); if(!box) return;
-  const days=dayNames();
-  const _csTg=window._csReadOnly?'':`<div style="display:flex;gap:6px;margin-bottom:12px;"><button id="csViewMine" style="flex:1;padding:9px;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;border:1.5px solid var(--border);${_csView!=='full'?'background:var(--dark);color:#fff;border-color:var(--dark);':'background:#fff;color:var(--dark);'}">${LANG==='en'?'My classes':'Moje lekce'}</button><button id="csViewFull" style="flex:1;padding:9px;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;border:1.5px solid var(--border);${_csView==='full'?'background:var(--dark);color:#fff;border-color:var(--dark);':'background:#fff;color:var(--dark);'}">${LANG==='en'?'Full schedule':'Celý rozvrh'}</button></div>`;
-  const _csWire=()=>{ if($('csViewMine')) $('csViewMine').onclick=()=>{ _csView='mine'; renderScheduleEditor(); }; if($('csViewFull')) $('csViewFull').onclick=()=>{ _csView='full'; renderScheduleEditor(); }; };
-  if(_csView==='full'){
-    if($('coachSchedAdd')) $('coachSchedAdd').style.display='none'; if($('coachSchedSave')) $('coachSchedSave').style.display='none';
-    let _fi='';
-    const _tdow=new Date().getDay(); for(let _off=0; _off<7; _off++){ const _d=(_tdow+_off)%7; const _dc=(_csFullSched||[]).filter(c=>Number(c.day)===_d).sort((a,b)=>String(a.time||'').localeCompare(String(b.time||''))); let _nd2=new Date(); for(let _k=0;_k<7 && _nd2.getDay()!==_d;_k++){ _nd2.setDate(_nd2.getDate()+1); } const _ymd=`${_nd2.getFullYear()}-${String(_nd2.getMonth()+1).padStart(2,'0')}-${String(_nd2.getDate()).padStart(2,'0')}`; const _ts=(_csTeamSlots&&_csTeamSlots[_ymd])||[]; if(!_dc.length && !_ts.length) continue; const _ndl=_nd2.getDate()+'.'+(_nd2.getMonth()+1)+'.'; _fi+=`<div style="font-family:'Bebas Neue';font-size:16px;letter-spacing:.03em;margin:12px 0 6px;color:var(--mid);">${days[_d]} <span style="font-size:12px;color:var(--light);font-family:'DM Sans';font-weight:600;">${_ndl}</span></div>`+_dc.map(c=>{ const _mine=c.coach===currentUser.id; const _lvl=(c.level&&c.level!=='all')?` · ${levelLabel(c.level)}`:''; const _led=c.coachName?` · 👤 ${escapeHtml(c.coachName)}`:''; const _rng=`${c.time||'--:--'}${c.dur?('–'+_classEnd(c.time,c.dur)):''}`; return `<div style="border:1px solid ${_mine?'var(--dark)':'var(--border)'};border-radius:11px;padding:9px 11px;margin-bottom:6px;background:${_mine?'var(--surf)':'#fff'};"><div style="font-size:13px;"><strong>${_rng}</strong> · ${c.name?escapeHtml(c.name):`<span style="color:var(--light);">${LANG==='en'?'(no name)':'(bez názvu)'}</span>`}<span style="color:var(--mid);font-size:12px;">${_lvl}${_led}</span>${_mine?` <span style="color:var(--dark);font-size:11px;font-weight:700;">· ${LANG==='en'?'you':'ty'}</span>`:''}</div></div>`; }).join('')+_ts.map(s2=>{ const _r=`${s2.time||'--:--'}${s2.end?('–'+s2.end):''}`; const _de=s2.disc?(disciplineEmoji(s2.disc)+' '):''; return `<div style="border:1px dashed #C0A24A;border-radius:11px;padding:9px 11px;margin-bottom:6px;background:#FFFDF6;"><div style="font-size:13px;"><strong>${_r}</strong> · <span style="color:#8a6a12;font-weight:700;">1:1 ${LANG==='en'?'available':'volno'}</span> <span style="color:var(--mid);font-size:12px;">· ${_de}👤 ${escapeHtml(s2.coachName||'')}</span></div></div>`; }).join(''); }
-    if(!_fi) _fi=`<p style="color:var(--light);font-size:13px;">${LANG==='en'?'No classes in the schedule yet.':'V rozvrhu zatím nejsou žádné lekce.'}</p>`;
-    box.innerHTML=_csTg+_fi;
-    _csWire(); return;
-  }
-  if($('coachSchedAdd')) $('coachSchedAdd').style.display=''; if($('coachSchedSave')) $('coachSchedSave').style.display='';
-  if(!_csSched.length){ box.innerHTML=_csTg+`<p style="color:var(--light);font-size:13px;margin-bottom:10px;">${LANG==='en'?'No classes yet. Add one below.':'Zatím žádné lekce. Přidej níže.'}</p>`; _csWire(); return; }
-  box.innerHTML=_csTg+_csSched.map((c,i)=>`
-    <div style="border:1px solid var(--border);border-radius:12px;padding:8px;margin-bottom:8px;">
-      <div style="display:flex;gap:6px;margin-bottom:6px;align-items:flex-end;">
-        <div style="width:72px;"><div style="font-size:10px;color:var(--mid);margin-bottom:3px;font-weight:600;">${LANG==='en'?'Day':'Den'}</div><select class="csDay" data-i="${i}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${days.map((d,di)=>`<option value="${di}" ${di===Number(c.day)?'selected':''}>${d}</option>`).join('')}</select></div>
-        <div style="flex:1;min-width:0;"><div style="font-size:10px;color:var(--mid);margin-bottom:3px;font-weight:600;">${LANG==='en'?'Start':'Začátek'}</div><input class="csTime" data-i="${i}" type="time" value="${c.time||'18:00'}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';"></div>
-        <div style="flex:1;min-width:0;"><div style="font-size:10px;color:var(--mid);margin-bottom:3px;font-weight:600;">${LANG==='en'?'End':'Konec'}</div><input class="csEnd" data-i="${i}" type="time" value="${_classEnd(c.time,c.dur||60)}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';"></div>
-        <button class="csDel" data-i="${i}" style="padding:10px 11px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-weight:700;cursor:pointer;">✕</button>
-      </div>
-      <input class="csName" data-i="${i}" type="text" value="${(c.name||'').replace(/"/g,'&quot;')}" placeholder="${LANG==='en'?'Class name':'Název lekce'}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';margin-bottom:6px;">
-      <select class="csLevel" data-i="${i}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${levelOptionsHtml(c.level)}</select>
-      <div style="margin-top:6px;"><div style="font-size:10px;color:var(--mid);margin-bottom:3px;font-weight:600;">${LANG==='en'?'Max capacity (people) *':'Max. kapacita (lidí) *'}</div><input class="csCap" data-i="${i}" type="number" min="1" max="200" inputmode="numeric" value="${c.cap!=null?c.cap:''}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';"></div>
-      <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;cursor:pointer;margin-top:8px;"><input type="checkbox" class="csAltTog" data-i="${i}" ${(c.altPlace||c.altAddr)?'checked':''} style="width:17px;height:17px;"> ${LANG==='en'?'Takes place at a different address?':'Koná se na jiné adrese?'}</label>
-      <div class="csAltBox" data-i="${i}" style="display:${(c.altPlace||c.altAddr)?'block':'none'};margin-top:6px;">
-        <input class="csAltPlace" data-i="${i}" type="text" value="${(c.altPlace||'').replace(/"/g,'&quot;')}" placeholder="${LANG==='en'?'Place (e.g. City Park)':'Místo (např. Park Lužánky)'}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';margin-bottom:6px;">
-        <input class="csAltAddr" data-i="${i}" type="text" value="${(c.altAddr||'').replace(/"/g,'&quot;')}" placeholder="${LANG==='en'?'Address':'Adresa'}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';">
-      </div>
-    </div>`).join('');
-  box.querySelectorAll('.csDay').forEach(el=>el.onchange=()=>{ _csSched[+el.dataset.i].day=+el.value; });
-  box.querySelectorAll('.csTime').forEach(el=>el.onchange=()=>{ _csSched[+el.dataset.i].time=el.value; renderScheduleEditor(); });
-  box.querySelectorAll('.csEnd').forEach(el=>el.onchange=()=>{ const _i=+el.dataset.i; _csSched[_i].dur=_endToDur(_csSched[_i].time, el.value); renderScheduleEditor(); });
-  box.querySelectorAll('.csName').forEach(el=>el.oninput=()=>{ _csSched[+el.dataset.i].name=el.value; });
-  box.querySelectorAll('.csLevel').forEach(el=>el.onchange=()=>{ _csSched[+el.dataset.i].level=el.value; });
-  box.querySelectorAll('.csCap').forEach(el=>el.oninput=()=>{ const v=parseInt(el.value); _csSched[+el.dataset.i].cap = (v>0? v : null); });
-  box.querySelectorAll('.csAltTog').forEach(el=>el.onchange=()=>{ const i=+el.dataset.i; const bx=box.querySelector('.csAltBox[data-i="'+i+'"]'); if(bx) bx.style.display=el.checked?'block':'none'; if(!el.checked){ _csSched[i].altPlace=null; _csSched[i].altAddr=null; const pe=box.querySelector('.csAltPlace[data-i="'+i+'"]'); const ae=box.querySelector('.csAltAddr[data-i="'+i+'"]'); if(pe)pe.value=''; if(ae)ae.value=''; } });
-  box.querySelectorAll('.csAltPlace').forEach(el=>el.oninput=()=>{ _csSched[+el.dataset.i].altPlace=el.value.trim()||null; });
-  box.querySelectorAll('.csAltAddr').forEach(el=>el.oninput=()=>{ _csSched[+el.dataset.i].altAddr=el.value.trim()||null; });
-  box.querySelectorAll('.csDel').forEach(el=>el.onclick=()=>{ _csSched.splice(+el.dataset.i,1); renderScheduleEditor(); });
-  _csWire();
-}
-async function saveCoachSchedule(){
-  if(!_csGymId) return;
-  // Refuse rather than fall back to 'all'. A silent default is how every class ended up open to
-  // everyone, which tells a student browsing the schedule nothing at all.
-  var _noLvl=(_csSched||[]).some(function(c){ return !c.level; });
-  if(_noLvl){ toast('\u26a0\ufe0f '+(LANG==='en'?'Pick a level for every class':'U ka\u017ed\u00e9 lekce vyber \u00farove\u0148')); return; }
-  // Same rule as the owner's schedule: every class needs a capacity, there is no club-wide fallback.
-  { const _nc=_csSched.findIndex(c=>!(Number(c.cap)>0));
-    if(_nc>=0){
-      const _c=_csSched[_nc];
-      toast(LANG==='en'
-        ? `⚠️ Set a max capacity for "${(_c.name||levelLabel(_c.level||'all'))}" (${_c.time||(function(){ try{ const _dn=(typeof dowShort==='function')?dowShort():['Ne','Po','\u00dat','St','\u010ct','P\u00e1','So']; return (_classSlots(_c)||[]).map(function(x){ return _dn[x.day]+' '+x.time; }).join(', '); }catch(e){ return ''; } })()})`
-        : `⚠️ Vyplň max. kapacitu u lekce „${(_c.name||levelLabel(_c.level||'all'))}" (${_c.time||(function(){ try{ const _dn=(typeof dowShort==='function')?dowShort():['Ne','Po','\u00dat','St','\u010ct','P\u00e1','So']; return (_classSlots(_c)||[]).map(function(x){ return _dn[x.day]+' '+x.time; }).join(', '); }catch(e){ return ''; } })()})`);
-      return;
-    } }
-  let fresh=[];
-  try{ const { data: g } = await supaClient.from('gyms').select('schedule').eq('id', _csGymId).single(); fresh = g&&g.schedule ? (typeof g.schedule==='string'?JSON.parse(g.schedule):g.schedule) : []; }catch(e){ fresh=[]; }
-  const others=(fresh||[]).filter(c=>c.coach!==currentUser.id);
-  const oldMine=(fresh||[]).filter(c=>c.coach===currentUser.id);
-  const mine=_csSched.map(c=>{ const nm=(c.name&&c.name.trim())?c.name.trim():levelLabel(c.level||'all'); return { day:Number(c.day)||0, time:c.time||'18:00', name:nm, level:c.level||'all', dur:Number(c.dur)||60, leader:currentUser.id, leaderName:currentUser.name||null, coach:currentUser.id, coachName:currentUser.name||null, coachOwned:true, cap:(Number(c.cap)>0?Number(c.cap):null), altPlace:c.altPlace||null, altAddr:c.altAddr||null, since:c.since||null, until:c.until||null, created_at:c.created_at||null }; });
-  const { error } = await supaClient.from('gyms').update({ schedule: JSON.stringify(others.concat(mine)) }).eq('id', _csGymId);
-  if(error){ toast('⚠️ '+error.message); return; }
-  toast(LANG==='en'?'✅ Saved':'✅ Uloženo');
-  // Notifikace klub ownerovi o nově přidaných lekcích (s proklikem na den v rozvrhu)
-  try{
-    const newOnes=mine.filter(m=> !oldMine.some(o=> Number(o.day)===m.day && (o.time||'')===(m.time||'') && (o.name||'')===(m.name||'')));
-    if(newOnes.length){
-      const { data: gg } = await supaClient.from('gyms').select('owner_id, name').eq('id', _csGymId).single();
-      const ownerId=gg&&gg.owner_id;
-      if(ownerId && ownerId!==currentUser.id){
-        for(const nc of newOnes){
-          await supaClient.from('notifications').insert({ user_id: ownerId, type:'system', read:false, data: JSON.stringify({ kind:'gym_class_added', coach: currentUser.name||'Kouč', className: nc.name, day: nc.day, time: nc.time }), message:`📅 ${currentUser.name||'Kouč'} přidal lekci „${nc.name}" do rozvrhu tvého klubu.` });
-        }
-        try{ updateNotifBadge(); }catch(e){}
-      }
-    }
-  }catch(e){}
-  closeSheet('shCoachSched');
 }
 function renderCancelling(){
   const box=$('cancelBody'); if(!box) return;
@@ -25246,7 +25191,10 @@ async function openClassAttendance(occ){
   if(_ocOwner && !isPast){
     const _ovk2=occ.date+'|'+(occ.time||'')+'|'+(occ.name||'');
     const _ovCur=(window._occOverride&&window._occOverride[_ovk2])||null;
-    const _scls=(_gymSchedule||[]).find(_c=>String(_c.time||'')===String(occ.time||'')&&((_c.name||'')===(occ.name||'')));
+    // Lekce rozvrhu, ze které termín je: jednorázová podle data a času, opakovaná podle termínů (slots).
+    const _scls=(_gymSchedule||[]).find(function(_c){ if(!_c || (_c.name||'')!==(occ.name||'')) return false;
+      if(_c.once) return _c.date===occ.date && String(_c.time||'')===String(occ.time||'');
+      return _classSlots(_c).some(function(sl){ return String(sl.time||'')===String(occ.time||'') && Number(sl.day)===new Date(occ.date+'T12:00:00').getDay(); }); });
     const _curLead=_ovCur?(_ovCur.leader||''):((_scls&&(_scls.leader||_scls.coach))||'');
     const _curPayee=_ovCur?(_ovCur.coach||''):((_scls&&_scls.coach)||'');
     const _tc=_gymTeamCoaches||[];
@@ -27249,7 +27197,7 @@ function _recpMembPay(pi){
     if(_rmAtt && !(_rmAtt.ok && _rmAtt.amount>0)) _rmAtt=null;
     if(_rmAtt) price=(String(cur).toUpperCase()==='CZK') ? Math.round(price-_rmAtt.amount) : Math.round((price-_rmAtt.amount)*100)/100;
     var _rp=$('rmPrice'); if(_rp) _rp.textContent=_rmPriceTxt();
-    var _ra=$('rmAtt'); if(_ra){ _ra.style.display=_rmAtt?'block':'none'; _ra.textContent=_rmAtt?('🎯 '+(EN?'Attendance discount ':'Sleva za docházku ')+'−'+fmtPrice(_rmAtt.amount,cur)+' '+sym+' ('+(EN?'attended ':'odchodil(a) ')+_rmAtt.attended+'/'+_rmAtt.reserved+', '+String(_rmAtt.pct).replace('.', EN?'.':',')+' %)'):''; }
+    var _ra=$('rmAtt'); if(_ra){ _ra.style.display=_rmAtt?'block':'none'; _ra.textContent=_rmAtt?('🎯 '+(EN?'Attendance discount ':'Sleva za docházku ')+'−'+fmtPrice(_rmAtt.amount,cur)+' '+sym+' ('+_attGot(_rmAtt, EN)+')'):''; }
     _rmQrRegen(); }
   async function _doMembPay(method){
     const sel=$('rmMember'); const sid=(sel&&sel.value)||''; if(!sid){ toast(EN?'\u26a0\ufe0f Select a member':'\u26a0\ufe0f Vyber \u010dlena'); return; }
@@ -27387,7 +27335,7 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom, _dpick){
     +'<div style="font-size:16px;font-weight:800;margin-bottom:2px;">\ud83d\udcf2 '+(EN?'Pay by bank QR':'Zaplať bankovním QR')+'</div>'
     +'<div style="font-size:13px;color:var(--mid);margin-bottom:4px;">'+escapeHtml(label)+'</div>'
     +'<div style="font-size:15px;color:#006040;font-weight:800;margin-bottom:4px;">'+fmtPrice(price,cur)+' '+sym+'</div>'
-    +(_qrAtt?('<div style="font-size:12px;color:#067647;font-weight:700;margin-bottom:6px;">🎯 '+(EN?'Attendance discount ':'Sleva za docházku ')+'−'+fmtPrice(_qrAtt.amount,cur)+' '+sym+' ('+(EN?'attendance ':'docházka ')+String(_qrAtt.pct).replace('.', EN?'.':',')+' %)</div>'):'')+((_qrTerm&&_qrTerm.calendar)?('<div style="font-size:12px;color:var(--mid);line-height:1.45;margin-bottom:8px;">'+escapeHtml(_calChargeNote(_qrTerm, cur, false).trim())+'</div>'):'')+(_pisOn?'<button id="oqrPisBtn" style="width:100%;padding:13px;background:#635BFF;color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';margin:6px 0;">🏦 '+(EN?'Pay from bank':'Zaplatit z účtu')+'</button>':'')+'<div id="oqrQrWrap"'+(_pisOn?' style="display:none;"':'')+'>'+'<div id="oqrCd" data-exp="'+(Date.now()+30*60000)+'" style="font-size:12px;font-weight:800;color:#9a5a00;margin-bottom:12px;">…</div>'
+    +(_qrAtt?('<div style="font-size:12px;color:#067647;font-weight:700;margin-bottom:6px;">🎯 '+(EN?'Attendance discount ':'Sleva za docházku ')+'−'+fmtPrice(_qrAtt.amount,cur)+' '+sym+' ('+_attGot(_qrAtt, EN)+')</div>'):'')+((_qrTerm&&_qrTerm.calendar)?('<div style="font-size:12px;color:var(--mid);line-height:1.45;margin-bottom:8px;">'+escapeHtml(_calChargeNote(_qrTerm, cur, false).trim())+'</div>'):'')+(_pisOn?'<button id="oqrPisBtn" style="width:100%;padding:13px;background:#635BFF;color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';margin:6px 0;">🏦 '+(EN?'Pay from bank':'Zaplatit z účtu')+'</button>':'')+'<div id="oqrQrWrap"'+(_pisOn?' style="display:none;"':'')+'>'+'<div id="oqrCd" data-exp="'+(Date.now()+30*60000)+'" style="font-size:12px;font-weight:800;color:#9a5a00;margin-bottom:12px;">…</div>'
     +'<div id="oqrBox" style="display:flex;justify-content:center;align-items:center;margin-bottom:12px;min-height:120px;"></div>'    +'<p style="font-size:11px;color:var(--light);line-height:1.4;margin:0 0 10px;text-align:center;">'+((/iP(hone|ad|od)/.test(navigator.userAgent||''))?(EN?'Quick QR save - double-tap it → “Save Image”.':'Rychlé uložení QR - 2x klepni → „Uložit obrázek“.'):(EN?'Double-tap the QR to save it to your gallery.':'Dvojím ťuknutím QR uložíš do galerie.'))+'</p>'
     +'<p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:6px;">'+(EN?'Scan with your banking app and send the payment. If you don\u2019t send it and tap \u201cI\u2019ve paid\u201d within 30 minutes, your '+(kind==='memb'?'membership ':'')+'reservation is automatically released to other students.':'Naskenuj bankovn\u00ed aplikac\u00ed a po\u0161li platbu. Pokud do 30 minut nepošleš a neodklepneš \u201eZaplaceno\u201c, tvoje rezervace'+(kind==='memb'?' permanentky':'')+' se automaticky uvolní pro další zájemce.')+'</p>'
     
@@ -28201,7 +28149,9 @@ function planCovers(plan, level, cls_or_name){
     if(!cls_or_name) return false;
     // Callers pass either the class object or just its name; the stored key needs the slots, so
     // a bare name can only be matched by prefix.
-    if(typeof cls_or_name === 'object'){ return cls.indexOf(_clsKey(cls_or_name)) >= 0; }
+    // Termín z upcomingClasses nese klíč své lekce (ckey) -- sám termín nemá seznam termínů, takže
+    // _clsKey(termínu) dával „název|" a permanentka „jen na tyto lekce" nepokryla nic.
+    if(typeof cls_or_name === 'object'){ return cls.indexOf(cls_or_name.ckey || _clsKey(cls_or_name)) >= 0; }
     const nm = String(cls_or_name);
     return cls.some(function(k){ return k === nm || k.indexOf(nm + '|') === 0; });
   }
@@ -28697,24 +28647,29 @@ function _dpOpenForm(idx){
   };
 }
 
-// SLEVA ZA DOCHÁZKU u permanentky (api/_att-disc.js): { on, pct, amt, min }. Prázdné = vypnuto.
+// SLEVA ZA DOCHÁZKU u permanentky (api/_att-disc.js): { on, amt, maxAbs, minVisits }, obě čísla
+// za měsíc a aspoň jedno vyplněné. Absence = proběhlá lekce permanentky bez docházky (i omluvená).
 function _planAttNorm(a){
-  if(!a || !a.on) return (a && (a.amt||a.pct)) ? { on:false, pct:parseFloat(a.pct)||80, amt:parseFloat(a.amt)||0, min:parseInt(a.min,10)||0 } : null;
-  return { on:true, pct:Math.min(100, Math.max(1, parseFloat(a.pct)||80)), amt:Math.max(0, parseFloat(a.amt)||0), min:Math.max(0, parseInt(a.min,10)||0) };
+  if(!a) return null;
+  const n=function(v){ return (v===''||v==null||!isFinite(Number(v)))?null:Math.max(0, Math.floor(Number(v))); };
+  const out={ on:!!a.on, amt:Math.max(0, parseFloat(a.amt)||0), maxAbs:n(a.maxAbs), minVisits:n(a.minVisits) };
+  if(out.minVisits===0) out.minVisits=null;
+  return (out.on || out.amt || out.maxAbs!=null || out.minVisits!=null) ? out : null;
 }
 function _planAttHtml(p, i, cur){
   const EN=LANG==='en', a=p.att||{}, on=!!a.on, mo=parseInt(p.months,10)||1, sym=_curSym(cur);
-  const inp=function(f, v, ph, w){ return '<input class="planAttF" data-i="'+i+'" data-f="'+f+'" type="number" inputmode="decimal" value="'+escapeHtml(v==null?'':String(v))+'" placeholder="'+ph+'" style="width:'+w+';box-sizing:border-box;padding:8px;border:1.5px solid var(--border);border-radius:9px;font-family:\'DM Sans\';font-size:13px;">'; };
+  const inp=function(f, v, ph){ return '<input class="planAttF" data-i="'+i+'" data-f="'+f+'" type="number" min="0" inputmode="numeric" value="'+escapeHtml(v==null?'':String(v))+'" placeholder="'+ph+'" style="width:100%;box-sizing:border-box;padding:8px;border:1.5px solid var(--border);border-radius:9px;font-family:\'DM Sans\';font-size:13px;">'; };
+  const lbl=function(t){ return '<div style="font-size:10.5px;color:var(--mid);font-weight:600;margin-bottom:3px;">'+t+'</div>'; };
   return '<div style="border:1px solid var(--border);background:#fff;border-radius:11px;padding:9px 11px;margin:8px 0;">'
     +'<label style="display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:700;cursor:pointer;color:var(--dark);"><input class="planAttOn" data-i="'+i+'" type="checkbox" '+(on?'checked':'')+' style="width:16px;height:16px;">🎯 '+(EN?'Attendance discount':'Sleva za docházku')+'</label>'
     +(on?('<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;">'
-        +'<div style="flex:1 1 90px;"><div style="font-size:10.5px;color:var(--mid);font-weight:600;margin-bottom:3px;">'+(EN?'Attendance at least (%)':'Docházka aspoň (%)')+'</div>'+inp('pct', a.pct!=null?a.pct:80, '80', '100%')+'</div>'
-        +'<div style="flex:1 1 90px;"><div style="font-size:10.5px;color:var(--mid);font-weight:600;margin-bottom:3px;">'+(EN?'Discount per month':'Sleva za měsíc')+' ('+sym+')</div>'+inp('amt', a.amt, cur==='CZK'?'100':'5', '100%')+'</div>'
-        +'<div style="flex:1 1 90px;"><div style="font-size:10.5px;color:var(--mid);font-weight:600;margin-bottom:3px;">'+(EN?'Min. bookings / month':'Min. rezervací / měsíc')+'</div>'+inp('min', a.min!=null?a.min:4, '4', '100%')+'</div>'
+        +'<div style="flex:1 1 90px;">'+lbl((EN?'Discount per month':'Sleva za měsíc')+' ('+sym+')')+inp('amt', a.amt, cur==='CZK'?'100':'5')+'</div>'
+        +'<div style="flex:1 1 90px;">'+lbl(EN?'Max absences / month':'Nejvýš absencí / měsíc')+inp('maxAbs', a.maxAbs, '2')+'</div>'
+        +'<div style="flex:1 1 90px;">'+lbl(EN?'Min. sessions / month':'Aspoň tréninků / měsíc')+inp('minVisits', a.minVisits, '8')+'</div>'
       +'</div>'
       +'<div style="font-size:10.5px;color:var(--light);line-height:1.5;margin-top:7px;">'+(EN
-        ? ('Whoever attends at least this share of the classes they booked (and books at least the minimum) pays the next period less'+(mo>1?(' — '+mo+' × the monthly discount for this '+mo+'-month plan, counted over its whole validity.'):'.')+' Attendance is what a coach, reception or you record; an excused class counts as missed. Card subscriptions are checked 2 days before renewal, other payments when the next period is bought (up to 7 days after the end). Members see their progress in the app.')
-        : ('Kdo z rezervovaných tréninků odchodí aspoň tolik procent (a má aspoň minimum rezervací), má další období levněji'+(mo>1?(' — u '+mo+'měsíční permanentky '+mo+'× měsíční sleva, počítá se celá doba platnosti.'):'.')+' Docházku zapisuje kouč, recepce nebo ty; omluvená lekce je absence. Předplatné kartou se vyhodnotí 2 dny před obnovou, jiné platby při koupi dalšího období (do 7 dní po konci). Člen vidí v appce, jak na tom je.'))+'</div>'):'')
+        ? ('Fill in at least one of the two. An absence is a class of this pass that took place and the member was not marked present (an excused class is an absence too); a class where you recorded nobody at all does not count. Sessions are every attendance at your club.'+(mo>1?(' For this '+mo+'-month pass: '+mo+' × the numbers and '+mo+' × the discount, over its whole validity.'):'')+' Card subscriptions are checked 2 days before renewal, other payments when the next period is bought (up to 7 days after the end). Members see their progress in the app.')
+        : ('Vyplň aspoň jedno z obou. Absence = proběhlá lekce téhle permanentky, na které člen nemá docházku (omluvená je taky absence); lekce, u které jsi nezapsal nikoho, se nepočítá. Tréninky = veškerá docházka člena v klubu.'+(mo>1?(' U '+mo+'měsíční permanentky: čísla i sleva × '+mo+', za celou dobu platnosti.'):'')+' Předplatné kartou se vyhodnotí 2 dny před obnovou, jiné platby při koupi dalšího období (do 7 dní po konci). Člen vidí v appce, jak na tom je.'))+'</div>'):'')
     +'</div>';
 }
 function renderPlansEditor(){
@@ -28824,8 +28779,8 @@ function renderPlansEditor(){
   box.querySelectorAll('.planAddTag').forEach(el=>el.onclick=()=>addCustomPlanTag(+el.dataset.i));
   box.querySelectorAll('.planIncome').forEach(el=>el.onclick=()=>{ _gymPlans[+el.dataset.i].income=el.dataset.v; renderPlansEditor(); });
   box.querySelectorAll('.planMemberCat').forEach(el=>el.oninput=()=>{ _gymPlans[+el.dataset.i].member_cat=el.value; });
-  box.querySelectorAll('.planAttOn').forEach(el=>el.onchange=()=>{ const it=_gymPlans[+el.dataset.i]; it.att=Object.assign({ pct:80, amt:'', min:4 }, it.att||{}, { on:!!el.checked }); renderPlansEditor(); });
-  box.querySelectorAll('.planAttF').forEach(el=>el.oninput=()=>{ const it=_gymPlans[+el.dataset.i]; it.att=Object.assign({ on:true, pct:80, amt:'', min:4 }, it.att||{}); it.att[el.dataset.f]=el.value; });
+  box.querySelectorAll('.planAttOn').forEach(el=>el.onchange=()=>{ const it=_gymPlans[+el.dataset.i]; it.att=Object.assign({ amt:'', maxAbs:2, minVisits:'' }, it.att||{}, { on:!!el.checked }); renderPlansEditor(); });
+  box.querySelectorAll('.planAttF').forEach(el=>el.oninput=()=>{ const it=_gymPlans[+el.dataset.i]; it.att=Object.assign({ on:true, amt:'', maxAbs:'', minVisits:'' }, it.att||{}); it.att[el.dataset.f]=el.value; });
   box.querySelectorAll('details.planCard').forEach(d=>d.addEventListener('toggle',()=>{ window._planOpen=window._planOpen||{}; window._planOpen[d.dataset.pid]=d.open; }));
   box.querySelectorAll('.planCoach').forEach(el=>el.onchange=()=>{ const it=_gymPlans[+el.dataset.i]; it.coach=el.value||null; const c=_gymTeamCoaches.find(x=>x.id===el.value); it.coachName=c?c.name:null; });
   box.querySelectorAll('.planLead').forEach(el=>el.onchange=()=>{ const it=_gymPlans[+el.dataset.i]; it.lead=el.value||null; const c=_gymTeamCoaches.find(x=>x.id===el.value); it.leadName=c?c.name:null; });
@@ -28871,7 +28826,7 @@ async function saveScheduleOnly(_onlyIdx){
       if(_hasSlot) return true;
       return !!((c.name&&String(c.name).trim()) || (c.level&&c.level!=='all') || (Number(c.cap)>0)); };
     if(_gymSchedule.some(function(c){ return !_real(c); })){
-      _gymSchedule=_gymSchedule.filter(_real);
+      _schedReplaceInPlace(_gymSchedule, _gymSchedule.filter(_real));
       if(_keepRef){ const _ni=_gymSchedule.indexOf(_keepRef); _onlyIdx=(_ni>=0)?_ni:null; }
     } }catch(e){}
   { const _dn=(typeof dowShort==='function')?dowShort():['Ne','Po','\u00dat','St','\u010ct','P\u00e1','So'];
@@ -28888,8 +28843,8 @@ async function saveScheduleOnly(_onlyIdx){
     if(_noCap>=0){
       const _c=_gymSchedule[_noCap]||{};
       toast(LANG==='en'
-        ? `⚠️ Set a max capacity for "${(_c.name||levelLabel(_c.level||'all'))}" (${_c.time||(function(){ try{ const _dn=(typeof dowShort==='function')?dowShort():['Ne','Po','\u00dat','St','\u010ct','P\u00e1','So']; return (_classSlots(_c)||[]).map(function(x){ return _dn[x.day]+' '+x.time; }).join(', '); }catch(e){ return ''; } })()})`
-        : `⚠️ Vyplň max. kapacitu u lekce „${(_c.name||levelLabel(_c.level||'all'))}" (${_c.time||(function(){ try{ const _dn=(typeof dowShort==='function')?dowShort():['Ne','Po','\u00dat','St','\u010ct','P\u00e1','So']; return (_classSlots(_c)||[]).map(function(x){ return _dn[x.day]+' '+x.time; }).join(', '); }catch(e){ return ''; } })()})`);
+        ? `⚠️ Set a max capacity for "${(_c.name||levelLabel(_c.level||'all'))}" (${_clsWhen(_c)})`
+        : `⚠️ Vyplň max. kapacitu u lekce „${(_c.name||levelLabel(_c.level||'all'))}" (${_clsWhen(_c)})`);
       return;
     } }
   {
@@ -28898,8 +28853,8 @@ async function saveScheduleOnly(_onlyIdx){
     if(_noLvl>=0){
       const _cl=_gymSchedule[_noLvl]||{};
       toast(LANG==='en'
-        ? `\u26a0\ufe0f Pick a level for "${(_cl.name||'')}" (${_cl.time||''})`
-        : `\u26a0\ufe0f Vyber \u00farove\u0148 u lekce \u201e${(_cl.name||'')}" (${_cl.time||''})`);
+        ? `\u26a0\ufe0f Pick a level for "${(_cl.name||'')}" (${_clsWhen(_cl)})`
+        : `\u26a0\ufe0f Vyber \u00farove\u0148 u lekce \u201e${(_cl.name||'')}" (${_clsWhen(_cl)})`);
       return;
     }
   }
@@ -28918,30 +28873,21 @@ async function saveScheduleOnly(_onlyIdx){
   }
   // POJISTKA PŘED ULOŽENÍM: dva termíny téže lekce v jednom dni se do databáze nedostanou.
   try{ const _rm=_dedupeAllSlots(); if(_rm) console.log('[rozvrh] slouceno duplicitnich terminu:', _rm); }catch(e){}
-  const sched = JSON.stringify(_gymSchedule.map(function(c){
-    // Ukládají se jen rovnocenné termíny (`slots`); zbytky starého tvaru se z lekce odstraní.
-    const _out=Object.assign({}, c, { name: (c.name&&String(c.name).trim()) ? c.name.trim() : levelLabel(c.level||'all') });
-    if(!c.once){
-      const _sl=_classSlots(c);
-      if(_sl.length){
-        _out.slots=_sl.map(function(x){ return { day:Number(x.day), time:x.time, dur:Number(x.dur)||60 }; });
-        // STARÝ TVAR SE UŽ NEZAPISUJE. Termíny jsou jen v `slots`; day/time/extraSlots by
-        // vedle nich časem zestárly a znovu by se z nich četl špatný čas pro cizí den.
-        delete _out.day; delete _out.time; delete _out.extraSlots;
-      }
-    }
-    return _out;
-  }));
+  // DO DATABÁZE JDE VŽDY VYČIŠTĚNÝ ROZVRH (_schedNorm) a editor pak drží přesně to, co je uložené.
+  // Dřív se vyčištěná verze připravila, ale poslal se syrový _gymSchedule: zůstávaly prázdné názvy
+  // a staré day/time vedle slots, a podle toho, kdo naposled uložil, se lekce jmenovala jinak.
+  const _norm=_schedNormAll(_gymSchedule);
+  const _clsNm=function(c){ return String((c&&c.name)||_schedLvlName((c&&c.level)||'all')).trim().toLowerCase(); };
   // Názvy opakovaných lekcí před uložením -- nová sada lekcí (nový název) dostane nabídku vlastní
   // permanentky. Podle názvu, ne podle termínů: úprava času u stávající lekce nabídku nevyvolá.
-  const _clsNm=function(c){ return String((c&&c.name)||levelLabel((c&&c.level)||'all')).trim().toLowerCase(); };
   let _namesBefore=null;
   try{ const _ps=_schedGym().schedule; const _pa=(typeof _ps==='string')?JSON.parse(_ps||'[]'):(_ps||[]); _namesBefore=new Set((_pa||[]).filter(function(c){ return c && !c.once; }).map(_clsNm)); }catch(e){ _namesBefore=null; }
+  let _coachNew=[];
   try{
     const { error } = await (async function(){
     const _g=_schedGym();
     if(!window._csEditGym){
-      return supaClient.from('gyms').update({ schedule: JSON.stringify(_gymSchedule) }).eq('id', _g.id);
+      return supaClient.from('gyms').update({ schedule: JSON.stringify(_norm) }).eq('id', _g.id);
     }
     // Režim trenéra: přečti aktuální rozvrh, nech v něm cizí lekce a nahraď jen vlastní.
     // Bez toho by trenér uložením přepsal celý klubový rozvrh.
@@ -28949,16 +28895,37 @@ async function saveScheduleOnly(_onlyIdx){
     try{ const { data:gg } = await supaClient.from('gyms').select('schedule').eq('id', _g.id).single();
       fresh = gg&&gg.schedule ? (typeof gg.schedule==='string'?JSON.parse(gg.schedule):gg.schedule) : []; }catch(e){ fresh=[]; }
     const others=(fresh||[]).filter(function(c){ return c && c.coach!==currentUser.id; });
-    const mine=(_gymSchedule||[]).map(function(c){
+    const oldMineNames=new Set((fresh||[]).filter(function(c){ return c && c.coach===currentUser.id; }).map(_clsNm));
+    const mine=_norm.map(function(c){
       return Object.assign({}, c, { coach:currentUser.id, coachName:currentUser.name||null, coachOwned:true,
         leader:c.leader||currentUser.id, leaderName:c.leaderName||currentUser.name||null });
     });
-    return supaClient.from('gyms').update({ schedule: JSON.stringify(others.concat(mine)) }).eq('id', _g.id);
+    _coachNew=mine.filter(function(c){ return !oldMineNames.has(_clsNm(c)); });
+    return supaClient.from('gyms').update({ schedule: JSON.stringify(_schedNormAll(others).concat(mine)) }).eq('id', _g.id);
   })();
     if(error){ toast('⚠️ '+error.message); return; }
-    _schedGym().schedule=sched;
+    _schedReplaceInPlace(_gymSchedule, _norm);
+    _schedGym().schedule=JSON.stringify(_norm);
     toast(LANG==='en'?'✅ Class saved':'✅ Lekce uložena');
     _schedEdit=-1; renderScheduleEditor();
+    // Trenér přidal lekci do rozvrhu klubu -> majitel to ví hned, s proklikem na den v rozvrhu.
+    try{
+      if(window._csEditGym && _coachNew.length){
+        const _gid=_schedGym().id;
+        const { data: gg } = await supaClient.from('gyms').select('owner_id, name').eq('id', _gid).single();
+        const ownerId=gg&&gg.owner_id;
+        if(ownerId && ownerId!==currentUser.id){
+          const _dn=(typeof dowShort==='function')?dowShort():['Ne','Po','\u00dat','St','\u010ct','P\u00e1','So'];
+          for(const nc of _coachNew){
+            const _sl=nc.once?[{ day:new Date(nc.date+'T12:00:00').getDay(), time:nc.time }]:_classSlots(nc);
+            const _when=_sl.map(function(x){ return _dn[x.day]+' '+x.time; }).join(', ');
+            await supaClient.from('notifications').insert({ user_id: ownerId, type:'system', read:false,
+              data: JSON.stringify({ kind:'gym_class_added', gym_id:_gid, coach: currentUser.name||'Kouč', className: nc.name, day: (_sl[0]||{}).day, time: (_sl[0]||{}).time, when:_when }),
+              message:`📅 ${currentUser.name||'Kouč'} přidal lekci „${nc.name}" (${_when}) do rozvrhu tvého klubu.` });
+          }
+        }
+      }
+    }catch(e){}
     // NOVÁ SADA OPAKOVANÝCH LEKCÍ (majitel, ne trenér): rovnou nabídnout permanentku jen na ni.
     try{
       const _nc=(!window._csEditGym && _namesBefore) ? _gymSchedule.find(function(c){ return c && !c.once && (_classSlots(c)||[]).length && !_namesBefore.has(_clsNm(c)); }) : null;
@@ -29099,6 +29066,7 @@ function _rcChip(i, d){
   const c=_gymSchedule[i]; if(!c) return; d=Number(d);
   // ROVNOCENNÉ TERMÍNY: pracuje se s polem `slots`, žádný z nich není „hlavní".
   if(!Array.isArray(c.slots)) c.slots=_classSlots(c).map(function(s){ return { day:Number(s.day), time:s.time, dur:Number(s.dur)||60 }; });
+  delete c.day; delete c.time; delete c.extraSlots;     // termíny už jen ve slots (_schedNorm)
   const at=c.slots.findIndex(function(s){ return Number(s.day)===d; });
   if(at>=0){
     c.slots.splice(at,1);              // odebrat den; lekce může zůstat i bez termínu, uložit ji pak nejde
@@ -29142,7 +29110,7 @@ async function _schDeletePastOnce(i){
 function _schDeleteClass(i){
   const c=_gymSchedule[i]; if(!c) return; const EN=LANG==='en';
   if(c.once){ _gymSchedule.splice(i,1); _rcShiftAfterDelete(i); _schedEdit=-1; renderScheduleEditor(); return; }
-  const _nm=(c.name||levelLabel(c.level||'all'))+' \u00b7 '+(c.time||'');
+  const _nm=(c.name||levelLabel(c.level||'all'))+' \u00b7 '+_clsWhen(c);
   const _msg=EN
     ? ('Delete the recurring class "'+_nm+'"?\n\nOK = remove it and ALL upcoming occurrences.\nCancel = keep it (you can cancel a single date from Attendance).')
     : ('Smazat opakovanou lekci \u201e'+_nm+'"?\n\nOK = smazat ji i V\u0160ECHNY nadch\u00e1zej\u00edc\u00ed term\u00edny.\nZru\u0161it = ponechat (jednotliv\u00fd term\u00edn zru\u0161\u00ed\u0161 v Doch\u00e1zce).');
@@ -29320,7 +29288,9 @@ function _recurBlockHtml(days){
   const EN=LANG==='en';
   const _t=_rcToday();
   const rows=_gymSchedule.map((c,i)=>({c:c,i:i})).filter(x=>x.c && !x.c.once && !(x.c.until && x.c.until < _t));
-  rows.sort(function(a,b){ return (Number(a.c.day)-Number(b.c.day)) || String(a.c.time||'').localeCompare(String(b.c.time||'')); });
+  // Řazení podle prvního termínu lekce (slots), ne podle starých day/time.
+  const _f=function(c){ const sl=_classSlots(c)[0]; return sl?{ d:Number(sl.day), t:String(sl.time||'') }:{ d:99, t:'' }; };
+  rows.sort(function(a,b){ const A=_f(a.c), B=_f(b.c); return (A.d-B.d) || A.t.localeCompare(B.t); });
   const open=!!window._rcOpen;
   let head='<div id="rcHead" style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;padding:12px 14px;border:1px solid var(--border);border-radius:12px;background:var(--surf);">'
     +'<div style="font-size:13.5px;font-weight:800;">🔁 '+(EN?'Recurring classes':'Opakované lekce')+' <span style="color:var(--light);font-weight:600;">('+rows.length+')</span></div>'
@@ -29636,7 +29606,8 @@ function renderScheduleEditor(){
   // JEDNORÁZOVÁ LEKCE: přesune se z editoru opakovaných lekcí do týdenního rozvrhu a otevře se
   // tam k úpravě data a času. Dřív z editoru opakovaných jen zmizela -- vypadalo to, že se okno zavřelo.
   box.querySelectorAll('.rcOnce').forEach(el=>el.onchange=()=>{ const i=+el.dataset.i; const it=_gymSchedule[i]; if(!it) return;
-    if(!el.checked){ it.once=false; delete it.date; renderScheduleEditor(); return; }
+    // Zpět na opakovanou: termín jednorázové lekce (den v týdnu z data + čas) se stane prvním z `slots`.
+    if(!el.checked){ _toRecurring(it); renderScheduleEditor(); return; }
     let _sl=[]; try{ _sl=(Array.isArray(it.slots)?it.slots:_classSlots(it)).filter(function(x){ return x && x.day!=null; }); }catch(e){}
     const _first=_sl[0]||null;
     let _d=null;
@@ -29668,6 +29639,7 @@ function renderScheduleEditor(){
   box.querySelectorAll('.rcSlotEnd').forEach(el=>el.onchange=()=>{
     const i=+el.dataset.i, si=+el.dataset.si; const it=_gymSchedule[i]; if(!it) return;
     if(!Array.isArray(it.slots)) it.slots=_classSlots(it).map(function(s){ return { day:Number(s.day), time:s.time, dur:Number(s.dur)||60 }; });
+    delete it.day; delete it.time; delete it.extraSlots;
     const _st=((document.querySelector('.rcSlotTime[data-i="'+i+'"][data-si="'+si+'"]')||{}).value)||(it.slots[si]&&it.slots[si].time)||'18:00';
     const d=_endToDur(_st, el.value); if(d>0 && it.slots[si]) it.slots[si].dur=d;
   });
@@ -29730,7 +29702,7 @@ function renderScheduleEditor(){
   box.querySelectorAll('.schCap').forEach(el=>el.oninput=()=>{ const v=parseInt(el.value); _gymSchedule[+el.dataset.i].cap=(v>0?v:null); const er=document.querySelector('.schCapErr[data-i="'+el.dataset.i+'"]'); if(er&&v>0){ er.style.display='none'; el.style.borderColor='var(--border)'; } });
   box.querySelectorAll('.schLevel').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].level=el.value; _gymSchedule[+el.dataset.i].kids=(el.value==='kids'); renderScheduleEditor(); });
   box.querySelectorAll('.schOnceMemb').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; if(it) it.memb=!!el.checked; });
-  box.querySelectorAll('.schOnce').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; it.once=el.checked; if(el.checked){ let _wd=weekDates.find(d=>d.getDay()===Number(it.day)); { const _t0=new Date(); _t0.setHours(0,0,0,0); if(!_wd || _wd<_t0){ _wd=new Date(_t0); while(_wd.getDay()!==Number(it.day)) _wd.setDate(_wd.getDate()+1); } } it.date=_wd?(_wd.getFullYear()+'-'+String(_wd.getMonth()+1).padStart(2,'0')+'-'+String(_wd.getDate()).padStart(2,'0')):''; } else { delete it.date; } renderScheduleEditor(); });
+  box.querySelectorAll('.schOnce').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; it.once=el.checked; if(el.checked){ let _wd=weekDates.find(d=>d.getDay()===Number(it.day)); { const _t0=new Date(); _t0.setHours(0,0,0,0); if(!_wd || _wd<_t0){ _wd=new Date(_t0); while(_wd.getDay()!==Number(it.day)) _wd.setDate(_wd.getDate()+1); } } it.date=_wd?(_wd.getFullYear()+'-'+String(_wd.getMonth()+1).padStart(2,'0')+'-'+String(_wd.getDate()).padStart(2,'0')):''; } else { _toRecurring(it); } renderScheduleEditor(); });
   box.querySelectorAll('.schDisc').forEach(el=>{ const it=_gymSchedule[+el.dataset.i]; if(!it.disc) it.disc=el.value||defaultDiscipline(); el.onchange=()=>{ _gymSchedule[+el.dataset.i].disc=el.value; }; });
   box.querySelectorAll('.schCoach').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; it.coach=el.value||null; const c=_gymTeamCoaches.find(x=>x.id===el.value); it.coachName=c?c.name:null; });
   box.querySelectorAll('.schLead').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; const oid=(_schedGym()&&_schedGym().owner_id)||(currentUser&&currentUser.id); it.leader=el.value||oid; if(it.leader===oid){ it.leaderName=(currentUser&&currentUser.name)||(LANG==='en'?'Owner':'Majitel'); } else { const cc=_gymTeamCoaches.find(x=>x.id===it.leader); it.leaderName=cc?cc.name:null; } renderScheduleEditor(); });
@@ -29868,7 +29840,9 @@ async function saveGymManage(){
     if(_noAcc){ toast(LANG==='en'?('\u26a0\ufe0f Pick which classes "'+_noAcc.name.trim()+'" covers'):('\u26a0\ufe0f U polo\u017eky \u201e'+_noAcc.name.trim()+'\u201c vyber, kter\u00e9 lekce pokr\u00fdv\u00e1')); return; } }
   const plans = _gymPlans.filter(p=>p.name && p.name.trim() && (parseFloat(p.price)||0)>0).map(p=>({ id:p.id||('p'+Math.random().toString(36).slice(2)), name:p.name.trim(), once:((parseInt(p.months,10)||1)===1 && !!p.once), price:parseFloat(p.price)||0, months:(parseInt(p.months,10)||1), classes:((p.classes&&p.classes.length)?p.classes:null), ends_on:(((parseInt(p.months,10)||1)>1 && p.ends_on)?p.ends_on:null), prorate:!!(((parseInt(p.months,10)||1)>1) && p.ends_on && p.prorate), access:p.access, income:p.income||'main', member_cat:(p.member_cat||'').trim()||null, coach:p.coach||null, coachName:p.coachName||null, disc:p.disc||null, lead:p.lead||null, leadName:p.leadName||null, kids:(p.access&&p.access.includes('kids'))||false, ageMin:(p.ageMin!=null&&p.ageMin!==''?parseInt(p.ageMin):null), ageMax:(p.ageMax!=null&&p.ageMax!==''?parseInt(p.ageMax):null), parentReq:!!p.parentReq, att:_planAttNorm(p.att) }));
   { const _bad=plans.find(function(p){ return p.att && p.att.on && !(p.att.amt>0); });
-    if(_bad){ toast(LANG==='en'?('⚠️ '+_bad.name+': enter the attendance discount amount, or switch it off'):('⚠️ '+_bad.name+': vyplň výši slevy za docházku, nebo ji vypni'), 1); return; } }
+    if(_bad){ toast(LANG==='en'?('⚠️ '+_bad.name+': enter the attendance discount amount, or switch it off'):('⚠️ '+_bad.name+': vyplň výši slevy za docházku, nebo ji vypni'), 1); return; }
+    const _bad2=plans.find(function(p){ return p.att && p.att.on && p.att.maxAbs==null && !(p.att.minVisits>0); });
+    if(_bad2){ toast(LANG==='en'?('⚠️ '+_bad2.name+': fill in max absences or min. sessions for the attendance discount'):('⚠️ '+_bad2.name+': u slevy za docházku vyplň nejvýš absencí, nebo aspoň tréninků'), 1); return; } }
   const first = plans[0]||null;
   const termsTitle = ($('mgTermsTitle')&&$('mgTermsTitle').value.trim())||null;
   let termsText = ($('mgTermsText')&&$('mgTermsText').value.trim())||null;
@@ -29885,8 +29859,8 @@ async function saveGymManage(){
     if(_noLvl>=0){
       const _cl=_gymSchedule[_noLvl]||{};
       toast(LANG==='en'
-        ? `\u26a0\ufe0f Pick a level for "${(_cl.name||'')}" (${_cl.time||''})`
-        : `\u26a0\ufe0f Vyber \u00farove\u0148 u lekce \u201e${(_cl.name||'')}" (${_cl.time||''})`);
+        ? `\u26a0\ufe0f Pick a level for "${(_cl.name||'')}" (${_clsWhen(_cl)})`
+        : `\u26a0\ufe0f Vyber \u00farove\u0148 u lekce \u201e${(_cl.name||'')}" (${_clsWhen(_cl)})`);
       return;
     }
   }
@@ -29903,22 +29877,13 @@ async function saveGymManage(){
       return;
     }
   }
+  // Rozepsané změny v editoru opakovaných lekcí (název, čas) se uloží i tímhle tlačítkem -- dřív se
+  // propsaly jen přes „Uložit" u lekce a uložení nastavení je tiše zahodilo.
+  try{ _rcApplyPending(); }catch(e){}
   // POJISTKA PŘED ULOŽENÍM: dva termíny téže lekce v jednom dni se do databáze nedostanou.
   try{ const _rm=_dedupeAllSlots(); if(_rm) console.log('[rozvrh] slouceno duplicitnich terminu:', _rm); }catch(e){}
-  const sched = JSON.stringify(_gymSchedule.map(function(c){
-    // Ukládají se jen rovnocenné termíny (`slots`); zbytky starého tvaru se z lekce odstraní.
-    const _out=Object.assign({}, c, { name: (c.name&&String(c.name).trim()) ? c.name.trim() : levelLabel(c.level||'all') });
-    if(!c.once){
-      const _sl=_classSlots(c);
-      if(_sl.length){
-        _out.slots=_sl.map(function(x){ return { day:Number(x.day), time:x.time, dur:Number(x.dur)||60 }; });
-        // STARÝ TVAR SE UŽ NEZAPISUJE. Termíny jsou jen v `slots`; day/time/extraSlots by
-        // vedle nich časem zestárly a znovu by se z nich četl špatný čas pro cizí den.
-        delete _out.day; delete _out.time; delete _out.extraSlots;
-      }
-    }
-    return _out;
-  }));
+  // Stejný vyčištěný tvar jako u uložení z Rozvrhu (_schedNorm).
+  const sched = JSON.stringify(_schedNormAll(_gymSchedule));
   let _curSel = ($('mgCurrency')&&$('mgCurrency').value) || _myGymData.currency || 'CZK';
   // CURRENCY LOCK: once a club has taken ANY payment, its currency is fixed -- changing it would break
   // reconciliation, doklady and history. Only checked when a change is actually attempted (no latency otherwise).
@@ -30074,7 +30039,7 @@ async function saveGymManage(){
     toast(LANG==='en'?'\u26a0\ufe0f No connection to the server \u2014 nothing was saved. Try again.':'\u26a0\ufe0f Spojen\u00ed se serverem selhalo \u2014 nic se neulo\u017eilo. Zkus to znovu.'); return; }
   if(error){ toast('⚠️ '+error.message); return; }
   if((termsText||'').trim()){ const _ch=(termsText!==_oldWaiverText)||!(_myGymData.waiver_version); if(_ch){ const _nv=(_myGymData.waiver_version||0)+1; const _h=_waiverHash((termsTitle||'')+'|'+termsText); try{ await supaClient.from('waiver_versions').insert({ gym_id:_myGymData.id, version:_nv, title:termsTitle||null, body:termsText, body_hash:_h, author_confirmed:true }); await supaClient.from('gyms').update({ waiver_version:_nv, waiver_author_confirmed_at:new Date().toISOString() }).eq('id', _myGymData.id); _myGymData.waiver_version=_nv; }catch(e){ console.warn('waiver ver', e); } } }
-  _myGymData.dropin_price=dropin; _myGymData.membership_plans=JSON.stringify(plans); _myGymData.membership_name=first?first.name:null; _myGymData.membership_price=first?first.price:null; _myGymData.schedule=sched; _myGymData.terms_title=termsTitle; _myGymData.terms_text=termsText; _myGymData.org_form=_gymOrgForm; 
+  _myGymData.dropin_price=dropin; _myGymData.membership_plans=JSON.stringify(plans); _myGymData.membership_name=first?first.name:null; _myGymData.membership_price=first?first.price:null; _myGymData.schedule=sched; try{ _schedReplaceInPlace(_gymSchedule, JSON.parse(sched)); }catch(e){} _myGymData.terms_title=termsTitle; _myGymData.terms_text=termsText; _myGymData.org_form=_gymOrgForm; 
   toast(LANG==='en'?'✅ Saved':'✅ Uloženo');
   try{ var _sov=document.querySelector('.setSecOv'); if(_sov&&_sov._close) _sov._close(); }catch(e){}
 }
@@ -33228,7 +33193,7 @@ $('btnUndo').onclick=()=>{ if(_deckMode==='events'){ evPrevCard(); return; } doU
 $('btnGo').onclick=()=>{ if(_deckMode==='events'){ const e=evCurrent(); if(e){ if(e._isCohort){ try{ _setCohSrc('mtl_deck'); }catch(e){} if(typeof openCohortSignup==='function') openCohortSignup(e.cohort_id||e.id); } else openEventView(e); } return; } doGo(); };
 $('btnSave').onclick=()=>{ if(_deckMode==='events'){ evSaveFav(); return; } doSave(); };
 (function(){
-  const SAVE_IDS=['btnSaveRates','coachSchedSave','mgSave']; const dirty=new Set();
+  const SAVE_IDS=['btnSaveRates','mgSave']; const dirty=new Set();
   function blockOf(el){ const sh=(el.closest&&el.closest('.sheet'))||null; if(!sh) return null; try{ const bs=sh.querySelectorAll('button'); for(const x of bs){ if(SAVE_IDS.includes(x.id)) return sh; } }catch(e){} return null; }
   function onEdit(e){ const t=e.target; if(!t||!t.matches) return; if(!t.matches('input:not([type=file]),textarea,select')) return; const blk=blockOf(t); if(!blk) return; const k=blk.id||((blk.className||'')+''); if(!k||dirty.has(k)) return; dirty.add(k); try{ toast(LANG==='en'?"💾 Don't forget to save your changes":'💾 Nezapomeň uložit změny tlačítkem'); }catch(e){} }
   document.addEventListener('input',onEdit,true);
@@ -35109,8 +35074,6 @@ if($('btnFoundingToggle')) $('btnFoundingToggle').onclick=toggleFoundingWindow;
 $('btnCloseAdmin').onclick=()=>closeSheet('shAdmin');
 $('btnCloseCoachStats').onclick=()=>closeSheet('shCoachStats');
 if($('btnCloseCoachSched')) $('btnCloseCoachSched').onclick=()=>{ window._csEditGym=null; closeSheet('shCoachSched'); };
-if($('coachSchedAdd')) $('coachSchedAdd').onclick=()=>{ _csSched.push({day:1,time:'18:00',name:'',level:'',dur:60, since:_rcToday(), created_at:new Date().toISOString()}); renderScheduleEditor(); };
-if($('coachSchedSave')) $('coachSchedSave').onclick=saveCoachSchedule;
 if($('btnCloseCoachRoster')) $('btnCloseCoachRoster').onclick=()=>closeSheet('shCoachRoster');
 $('btnAdminOnline').onclick=()=>{ openOnline('founder'); };
 if($('btnCircleHub')) $('btnCircleHub').onclick=()=>{ openSheet('shCircleHub'); };
