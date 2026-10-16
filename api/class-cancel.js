@@ -13,6 +13,12 @@
 //
 //   POST { action:'preview', gym_id, occ:{date,time,name} }
 //   POST { action:'cancel',  gym_id, occ:{date,time,name,coach}, mode:'advance'|'forgot', note, choices:{bookingId:'refund'|'move'} }
+//
+// UKONČENÍ LEKCE (smazání jednorázové, nebo opakovaná „tento a všechny další termíny"): rozvrh
+// zkrátí appka (opakovaná dostane `until`, jednorázová zmizí), tady se vyřeší každý, kdo je na
+// některý z rušených termínů přihlášený -- stejně jako při zrušení jednoho termínu.
+//   POST { action:'end_preview', gym_id, cls:{name,once,date,time,slots}, from:'YYYY-MM-DD' }
+//   POST { action:'end',         gym_id, cls:{...}, from, note, choices:{bookingId:'refund'|'move'} }
 
 import Stripe from 'stripe';
 import { feeRefundableForPI, feeRefundableForTx, bankFeeRefundable } from './_fee-window.js';
@@ -60,16 +66,36 @@ function dCz(date, time) {
 }
 
 async function loadAffected(gym, occ) {
-  // Lekce bez názvu: rezervace ho mají jako NULL (zápis `name || null`), ne prázdný text.
-  // (Nové rozvrhy už prázdné názvy nemají -- _schedNorm / sql/schedule-normalize.sql.)
   const f = `gym_id=eq.${q(gym.id)}&class_date=eq.${q(occ.date)}&class_time=eq.${q(occ.time || '')}`
     + (occ.name ? `&class_name=eq.${q(occ.name)}` : '&or=(class_name.is.null,class_name.eq.)');
   const bookings = (await sb(`gym_bookings?${f}&status=in.(active,paid_claimed,reserved,pending)&select=*`)) || [];
-  const resv = (await sb(`gym_class_reservations?${f}&select=id,student_id,student_name,child_name,status`)) || [];
-  // Rezervace, které jsou jen držením místa k zaplacenému vstupu, se ukazují u vstupu, ne zvlášť.
-  const bookedIds = new Set(bookings.map((b) => String(b.student_id || '')));
-  const members = resv.filter((r) => r.status !== 'released' && !bookedIds.has(String(r.student_id || '')));
+  const resv = (await sb(`gym_class_reservations?${f}&select=id,student_id,student_name,child_name,status,class_date,class_time`)) || [];
+  return split(bookings, resv);
+}
+// Rezervace, které jsou jen držením místa k zaplacenému vstupu, se ukazují u vstupu, ne zvlášť.
+function split(bookings, resv) {
+  const bookedIds = new Set(bookings.map((b) => `${b.class_date}|${b.class_time}|${b.student_id || ''}`));
+  const members = resv.filter((r) => r.status !== 'released' && !bookedIds.has(`${r.class_date}|${r.class_time}|${r.student_id || ''}`));
   return { bookings, resv, members };
+}
+
+// Všechny rezervace na termíny lekce od data `from` (včetně). Opakovaná lekce: jen dny a časy
+// jejích termínů (dvě lekce téhož názvu v jiný čas zůstanou netknuté); jednorázová: její datum.
+async function loadAffectedFrom(gym, cls, from) {
+  const name = String(cls.name || '').trim();
+  const nf = name ? `&class_name=eq.${q(name)}` : '&or=(class_name.is.null,class_name.eq.)';
+  const df = cls.once ? `&class_date=eq.${q(cls.date || '')}` : `&class_date=gte.${q(from)}`;
+  const f = `gym_id=eq.${q(gym.id)}${df}${nf}`;
+  const slots = (Array.isArray(cls.slots) ? cls.slots : []).map((x) => `${Number(x.day)}@${String(x.time || '').slice(0, 5)}`);
+  const hit = (r) => {
+    const t = String(r.class_time || '').slice(0, 5);
+    if (cls.once) return String(r.class_date) >= String(from) && t === String(cls.time || '').slice(0, 5);
+    const dow = new Date(String(r.class_date) + 'T12:00:00Z').getUTCDay();
+    return slots.includes(`${dow}@${t}`);
+  };
+  const bookings = ((await sb(`gym_bookings?${f}&status=in.(active,paid_claimed,reserved,pending)&select=*`)) || []).filter(hit);
+  const resv = ((await sb(`gym_class_reservations?${f}&select=id,student_id,student_name,child_name,status,class_date,class_time`)) || []).filter(hit);
+  return split(bookings, resv);
 }
 
 async function notify(userId, cs, en, data) {
@@ -89,133 +115,163 @@ export default async function handler(req, res) {
     const me = await whoami(req);
     if (!me) return res.status(401).json({ error: 'no token' });
     const b = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
+    const isEnd = b.action === 'end' || b.action === 'end_preview';
     const occ = b.occ || {};
-    if (!b.gym_id || !occ.date) return res.status(400).json({ error: 'gym_id + occ.date required' });
+    const cls = b.cls || {};
+    const from = String(b.from || '').slice(0, 10);
+    if (!b.gym_id) return res.status(400).json({ error: 'gym_id required' });
+    if (!isEnd && !occ.date) return res.status(400).json({ error: 'occ.date required' });
+    if (isEnd && (!/^\d{4}-\d{2}-\d{2}$/.test(from) || (cls.once ? !cls.date : !(Array.isArray(cls.slots) && cls.slots.length))))
+      return res.status(400).json({ error: 'cls + from required' });
     const gym = ((await sb(`gyms?id=eq.${q(b.gym_id)}&select=id,name,owner_id,stripe_account,currency`)) || [])[0];
     if (!gym) return res.status(404).json({ error: 'gym not found' });
     if (!(await canManage(gym, me))) return res.status(403).json({ error: 'forbidden' });
 
-    const { bookings, resv, members } = await loadAffected(gym, occ);
+    const aff = isEnd ? await loadAffectedFrom(gym, cls, from) : await loadAffected(gym, occ);
 
-    if (b.action === 'preview') {
+    if (b.action === 'preview' || b.action === 'end_preview') {
       return res.status(200).json({ ok: true,
-        bookings: bookings.map((x) => ({ id: x.id, kind: kindOf(x), name: x.child_name || x.student_name || x.guest_name || 'Student',
-          has_account: !!x.student_id, amount: x.amount, currency: x.currency || gym.currency || 'CZK', method: x.payment_method || null })),
-        members: members.map((r) => ({ id: r.id, name: r.child_name || r.student_name || 'Člen' })) });
+        bookings: aff.bookings.map((x) => ({ id: x.id, kind: kindOf(x), name: x.child_name || x.student_name || x.guest_name || 'Student',
+          has_account: !!x.student_id, amount: x.amount, currency: x.currency || gym.currency || 'CZK', method: x.payment_method || null,
+          date: x.class_date || null, time: x.class_time || null })),
+        members: aff.members.map((r) => ({ id: r.id, name: r.child_name || r.student_name || 'Člen', date: r.class_date || null, time: r.class_time || null })) });
     }
+    if (b.action !== 'cancel' && b.action !== 'end') return res.status(400).json({ error: 'unknown action' });
 
-    if (b.action !== 'cancel') return res.status(400).json({ error: 'unknown action' });
-    const mode = b.mode === 'forgot' ? 'forgot' : 'advance';
-    const note = String(b.note || '').trim().slice(0, 300);
-    const choices = b.choices || {};
-    const nowIso = new Date().toISOString();
-    const when = dCz(occ.date, occ.time);
-    const cls = occ.name || 'lekce';
-    const reasonCs = note ? ` Důvod: ${note}` : '';
-    const reasonEn = note ? ` Reason: ${note}` : '';
-    const mp = ((await sb(`profiles?id=eq.${q(me)}&select=name`)) || [])[0] || {};
+    const ctx = {
+      gym, me, choices: b.choices || {},
+      mode: b.mode === 'forgot' ? 'forgot' : 'advance',
+      note: String(b.note || '').trim().slice(0, 300),
+      nowIso: new Date().toISOString(),
+      myName: ((((await sb(`profiles?id=eq.${q(me)}&select=name`)) || [])[0]) || {}).name || null,
+      // Ukončená opakovaná lekce: zpráva říká, že lekce končí (ne že „vypadl jeden termín").
+      ended: b.action === 'end' && !cls.once,
+    };
+    const out = { refunded_card: [], bank_refund: [], moved: [], trials: [], unpaid: [], members: 0, errors: [] };
 
-    // 1) Termín je zrušený (rozvrh ho ukáže jako zrušený, nejde na něj nic koupit).
-    // Bez spoléhání na unikátní index (v databázi není -- upsert s on_conflict padal): najít
-    // záznam termínu a přepsat, jinak založit.
-    {
+    if (b.action === 'cancel') {
+      // Termín je zrušený (rozvrh ho ukáže jako zrušený, nejde na něj nic koupit).
+      // Bez spoléhání na unikátní index (v databázi není -- upsert s on_conflict padal): najít
+      // záznam termínu a přepsat, jinak založit.
       const f = `gym_id=eq.${q(gym.id)}&class_date=eq.${q(occ.date)}` +
         (occ.time ? `&class_time=eq.${q(occ.time)}` : '&class_time=is.null') +
         (occ.name ? `&class_name=eq.${q(occ.name)}` : '&class_name=is.null');
       const row = { gym_id: gym.id, class_date: occ.date, class_time: occ.time || null, class_name: occ.name || null,
-        coach_id: occ.coach || null, status: 'cancelled', reason: mode, logged_by: me };
+        coach_id: occ.coach || null, status: 'cancelled', reason: ctx.mode, logged_by: me };
       const ex = (await sb(`gym_class_log?${f}&select=id&limit=1`)) || [];
       if (ex[0]) await sb(`gym_class_log?id=eq.${q(ex[0].id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(row) });
       else await sb('gym_class_log', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify(row) });
-    }
-
-    const out = { refunded_card: [], bank_refund: [], moved: [], trials: [], unpaid: [], members: 0, errors: [] };
-
-    for (const bk of bookings) {
-      const k = kindOf(bk);
-      const who = bk.child_name || bk.student_name || bk.guest_name || 'Student';
-      const amt = Number(bk.amount || 0), cur = bk.currency || gym.currency || 'CZK';
-      const money = `${amt} ${cur === 'CZK' ? 'Kč' : cur}`;
-      const base = { gym_id: gym.id, gym_name: gym.name, booking_id: bk.id, class_name: cls, class_date: occ.date, class_time: occ.time || '' };
-      try {
-        if (k === 'trial') {
-          await sb(`gym_bookings?id=eq.${q(bk.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'cancelled', club_cancelled_at: nowIso }) });
-          // Nárok zpět: záznam o využitém zkušebním se smaže (nepočítá se ani jako zrušení).
-          const tr = (await sb(`gym_trials?gym_id=eq.${q(gym.id)}&student_id=eq.${q(bk.student_id)}&child_name=eq.${q(bk.child_name || '')}&class_date=eq.${q(occ.date)}&select=id&order=created_at.desc&limit=1`)) || [];
-          if (tr[0]) await sb(`gym_trials?id=eq.${q(tr[0].id)}`, { method: 'DELETE', prefer: 'return=minimal' });
-          out.trials.push(who);
-          await notify(bk.student_id,
-            `🚫 ${gym.name} zrušil lekci ${cls} (${when}).${reasonCs} Tvůj zkušební trénink zdarma ti zůstává — rezervuj si jiný termín.`,
-            `🚫 ${gym.name} cancelled ${cls} (${when}).${reasonEn} Your free trial class is still yours — book another time.`,
-            Object.assign({ choice: 'trial' }, base));
-        } else if (k === 'card') {
-          // 100 % zpět automaticky, včetně provize MTL (chyba není na straně studenta).
-          if (!stripe || !gym.stripe_account) throw new Error('stripe not configured');
-          await stripe.refunds.create({ payment_intent: bk.payment_intent, refund_application_fee: await feeRefundableForPI(bk.payment_intent) }, { stripeAccount: gym.stripe_account });
-          await sb(`gym_bookings?id=eq.${q(bk.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'cancelled', club_cancelled_at: nowIso, club_cancel_choice: 'refund' }) });
-          out.refunded_card.push(`${who} · ${money}`);
-          await notify(bk.student_id,
-            `🚫 ${gym.name} zrušil lekci ${cls} (${when}).${reasonCs} Vracíme ti celou platbu ${money} na kartu — na účtu bývá do 5–10 dnů.`,
-            `🚫 ${gym.name} cancelled ${cls} (${when}).${reasonEn} We are refunding the full ${money} to your card — it usually arrives within 5–10 days.`,
-            Object.assign({ choice: 'refund', amount: amt, currency: cur }, base));
-          await confirmRow(bk, gym, me, mp.name, occ, amt, cur, note);
-        } else if (k === 'bank') {
-          const ch = choices[bk.id] === 'move' ? 'move' : 'refund';
-          if (ch === 'move') {
-            // Zůstává zaplacený; student si vybere jiný termín (bez limitu přesunů, i zpětně).
-            await sb(`gym_bookings?id=eq.${q(bk.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ club_cancelled_at: nowIso, club_cancel_choice: 'move' }) });
-            out.moved.push(`${who} · ${money}`);
-            await notify(bk.student_id,
-              `🚫 ${gym.name} zrušil lekci ${cls} (${when}).${reasonCs} Zaplacený vstup ${money} ti zůstává — vyber si jiný termín, bez poplatku.`,
-              `🚫 ${gym.name} cancelled ${cls} (${when}).${reasonEn} Your paid entry (${money}) stays — pick another time, free of charge.`,
-              Object.assign({ choice: 'move' }, base));
-          } else {
-            // MTL peníze z převodu nedrží -- vrací je klub. Provize z té platby se ruší.
-            await sb(`gym_bookings?id=eq.${q(bk.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'cancelled', club_cancelled_at: nowIso, club_cancel_choice: 'refund' }) });
-            // Provize se odečte jen, dokud není stržená (pak už ne -- stejné pravidlo jako u karty).
-            const tx = (await sb(`transactions?source_booking_id=eq.${q(bk.id)}&select=id,gross_amount,mtl_fee,commission_status`)) || [];
-            for (const t of tx) {
-              const patch = { status: 'refunded', refund_amount: t.gross_amount };
-              if (bankFeeRefundable(t)) patch.mtl_fee_refunded = t.mtl_fee;
-              await sb(`transactions?id=eq.${q(t.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch) });
-            }
-            const how = bk.payment_method === 'cash' ? 'hotově' : 'převodem na účet, ze kterého jsi platil/a';
-            const howEn = bk.payment_method === 'cash' ? 'in cash' : 'by bank transfer to the account you paid from';
-            out.bank_refund.push({ name: who, amount: amt, currency: cur, method: bk.payment_method || null });
-            await notify(bk.student_id,
-              `🚫 ${gym.name} zrušil lekci ${cls} (${when}).${reasonCs} Klub ti vrátí ${money} ${how}. Kdyby peníze do týdne nedorazily, napiš klubu.`,
-              `🚫 ${gym.name} cancelled ${cls} (${when}).${reasonEn} The club will refund ${money} ${howEn}. If it has not arrived within a week, contact the club.`,
-              Object.assign({ choice: 'refund', amount: amt, currency: cur }, base));
-            await confirmRow(bk, gym, me, mp.name, occ, amt, cur, note);
-          }
-        } else {
-          await sb(`gym_bookings?id=eq.${q(bk.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'cancelled', club_cancelled_at: nowIso }) });
-          out.unpaid.push(who);
-          await notify(bk.student_id,
-            `🚫 ${gym.name} zrušil lekci ${cls} (${when}).${reasonCs} Rezervace je zrušená, nic neplatíš.`,
-            `🚫 ${gym.name} cancelled ${cls} (${when}).${reasonEn} Your booking is cancelled, there is nothing to pay.`,
-            Object.assign({ choice: 'none' }, base));
-        }
-      } catch (e) {
-        console.error('[class-cancel] booking', bk.id, e.message);
-        out.errors.push({ name: who, error: String(e.message || e).slice(0, 160) });
+      await settle(ctx, occ, aff, out);
+    } else {
+      // Ukončení: termíny zmizí z rozvrhu samy (appka zapíše `until` / jednorázovou smaže), takže
+      // se nic nezapisuje do evidence lekcí -- jen se vyřeší přihlášení, termín po termínu.
+      const keys = [...new Set(aff.bookings.concat(aff.resv).map((r) => `${r.class_date}|${String(r.class_time || '')}`))].sort();
+      for (const k of keys) {
+        const [d, t] = k.split('|');
+        const o = { date: d, time: t, name: String(cls.name || '').trim() || null };
+        const on = (r) => String(r.class_date) === d && String(r.class_time || '') === t;
+        await settle(ctx, o, { bookings: aff.bookings.filter(on), resv: aff.resv.filter(on), members: aff.members.filter(on) }, out);
       }
-    }
-
-    // Členové: uvolnit rezervace (i držená místa k vstupům) a dát vědět.
-    for (const r of resv) {
-      try { await sb(`gym_class_reservations?id=eq.${q(r.id)}`, { method: 'DELETE', prefer: 'return=minimal' }); } catch (e) {}
-    }
-    for (const r of members) {
-      out.members++;
-      await notify(r.student_id,
-        `🚫 ${gym.name} zrušil lekci ${cls} (${when}).${reasonCs} Tvoje rezervace se uvolnila, členství se tím nemění.`,
-        `🚫 ${gym.name} cancelled ${cls} (${when}).${reasonEn} Your reservation was released; your membership is not affected.`,
-        { choice: 'member', gym_id: gym.id, gym_name: gym.name, class_name: cls, class_date: occ.date, class_time: occ.time || '' });
     }
     return res.status(200).json({ ok: true, result: out });
   } catch (e) {
     return res.status(500).json({ error: String((e && e.message) || e).slice(0, 300) });
+  }
+}
+
+// Vyřeší každého přihlášeného na jeden termín: vrácení / přesun / uvolnění + notifikace s proklikem.
+async function settle(ctx, occ, aff, out) {
+  const { gym, me, choices, note, nowIso } = ctx;
+  const { bookings, resv, members } = aff;
+  const when = dCz(occ.date, occ.time);
+  const cls = occ.name || 'lekce';
+  const reasonCs = note ? ` Důvod: ${note}` : '';
+  const reasonEn = note ? ` Reason: ${note}` : '';
+  // Úvod zprávy: zrušený termín, nebo konec opakované lekce (od kterého data už nebude).
+  const headCs = ctx.ended ? `🚫 ${gym.name} ukončil lekci ${cls} — termín ${when} už nebude.` : `🚫 ${gym.name} zrušil lekci ${cls} (${when}).`;
+  const headEn = ctx.ended ? `🚫 ${gym.name} discontinued ${cls} — the ${when} class will not take place.` : `🚫 ${gym.name} cancelled ${cls} (${when}).`;
+
+  for (const bk of bookings) {
+    const k = kindOf(bk);
+    const who = bk.child_name || bk.student_name || bk.guest_name || 'Student';
+    const amt = Number(bk.amount || 0), cur = bk.currency || gym.currency || 'CZK';
+    const money = `${amt} ${cur === 'CZK' ? 'Kč' : cur}`;
+    const base = { gym_id: gym.id, gym_name: gym.name, booking_id: bk.id, class_name: cls, class_date: occ.date, class_time: occ.time || '' };
+    try {
+      if (k === 'trial') {
+        await sb(`gym_bookings?id=eq.${q(bk.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'cancelled', club_cancelled_at: nowIso }) });
+        // Nárok zpět: záznam o využitém zkušebním se smaže (nepočítá se ani jako zrušení).
+        const tr = (await sb(`gym_trials?gym_id=eq.${q(gym.id)}&student_id=eq.${q(bk.student_id)}&child_name=eq.${q(bk.child_name || '')}&class_date=eq.${q(occ.date)}&select=id&order=created_at.desc&limit=1`)) || [];
+        if (tr[0]) await sb(`gym_trials?id=eq.${q(tr[0].id)}`, { method: 'DELETE', prefer: 'return=minimal' });
+        out.trials.push(who);
+        await notify(bk.student_id,
+          `${headCs}${reasonCs} Tvůj zkušební trénink zdarma ti zůstává — rezervuj si jiný termín.`,
+          `${headEn}${reasonEn} Your free trial class is still yours — book another time.`,
+          Object.assign({ choice: 'trial' }, base));
+      } else if (k === 'card') {
+        // 100 % zpět automaticky, včetně provize MTL (chyba není na straně studenta).
+        if (!stripe || !gym.stripe_account) throw new Error('stripe not configured');
+        await stripe.refunds.create({ payment_intent: bk.payment_intent, refund_application_fee: await feeRefundableForPI(bk.payment_intent) }, { stripeAccount: gym.stripe_account });
+        await sb(`gym_bookings?id=eq.${q(bk.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'cancelled', club_cancelled_at: nowIso, club_cancel_choice: 'refund' }) });
+        out.refunded_card.push(`${who} · ${money}`);
+        await notify(bk.student_id,
+          `${headCs}${reasonCs} Vracíme ti celou platbu ${money} na kartu — na účtu bývá do 5–10 dnů.`,
+          `${headEn}${reasonEn} We are refunding the full ${money} to your card — it usually arrives within 5–10 days.`,
+          Object.assign({ choice: 'refund', amount: amt, currency: cur }, base));
+        await confirmRow(bk, gym, me, ctx.myName, occ, amt, cur, note);
+      } else if (k === 'bank') {
+        const ch = choices[bk.id] === 'move' ? 'move' : 'refund';
+        if (ch === 'move') {
+          // Zůstává zaplacený; student si vybere jiný termín (bez limitu přesunů, i zpětně).
+          await sb(`gym_bookings?id=eq.${q(bk.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ club_cancelled_at: nowIso, club_cancel_choice: 'move' }) });
+          out.moved.push(`${who} · ${money}`);
+          await notify(bk.student_id,
+            `${headCs}${reasonCs} Zaplacený vstup ${money} ti zůstává — vyber si jiný termín, bez poplatku.`,
+            `${headEn}${reasonEn} Your paid entry (${money}) stays — pick another time, free of charge.`,
+            Object.assign({ choice: 'move' }, base));
+        } else {
+          // MTL peníze z převodu nedrží -- vrací je klub. Provize z té platby se ruší.
+          await sb(`gym_bookings?id=eq.${q(bk.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'cancelled', club_cancelled_at: nowIso, club_cancel_choice: 'refund' }) });
+          // Provize se odečte jen, dokud není stržená (pak už ne -- stejné pravidlo jako u karty).
+          const tx = (await sb(`transactions?source_booking_id=eq.${q(bk.id)}&select=id,gross_amount,mtl_fee,commission_status`)) || [];
+          for (const t of tx) {
+            const patch = { status: 'refunded', refund_amount: t.gross_amount };
+            if (bankFeeRefundable(t)) patch.mtl_fee_refunded = t.mtl_fee;
+            await sb(`transactions?id=eq.${q(t.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch) });
+          }
+          const how = bk.payment_method === 'cash' ? 'hotově' : 'převodem na účet, ze kterého jsi platil/a';
+          const howEn = bk.payment_method === 'cash' ? 'in cash' : 'by bank transfer to the account you paid from';
+          out.bank_refund.push({ name: who, amount: amt, currency: cur, method: bk.payment_method || null });
+          await notify(bk.student_id,
+            `${headCs}${reasonCs} Klub ti vrátí ${money} ${how}. Kdyby peníze do týdne nedorazily, napiš klubu.`,
+            `${headEn}${reasonEn} The club will refund ${money} ${howEn}. If it has not arrived within a week, contact the club.`,
+            Object.assign({ choice: 'refund', amount: amt, currency: cur }, base));
+          await confirmRow(bk, gym, me, ctx.myName, occ, amt, cur, note);
+        }
+      } else {
+        await sb(`gym_bookings?id=eq.${q(bk.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'cancelled', club_cancelled_at: nowIso }) });
+        out.unpaid.push(who);
+        await notify(bk.student_id,
+          `${headCs}${reasonCs} Rezervace je zrušená, nic neplatíš.`,
+          `${headEn}${reasonEn} Your booking is cancelled, there is nothing to pay.`,
+          Object.assign({ choice: 'none' }, base));
+      }
+    } catch (e) {
+      console.error('[class-cancel] booking', bk.id, e.message);
+      out.errors.push({ name: who, error: String(e.message || e).slice(0, 160) });
+    }
+  }
+
+  // Členové: uvolnit rezervace (i držená místa k vstupům) a dát vědět.
+  for (const r of resv) {
+    try { await sb(`gym_class_reservations?id=eq.${q(r.id)}`, { method: 'DELETE', prefer: 'return=minimal' }); } catch (e) {}
+  }
+  for (const r of members) {
+    out.members++;
+    await notify(r.student_id,
+      `${headCs}${reasonCs} Tvoje rezervace se uvolnila, členství se tím nemění.`,
+      `${headEn}${reasonEn} Your reservation was released; your membership is not affected.`,
+      { choice: 'member', gym_id: gym.id, gym_name: gym.name, class_name: cls, class_date: occ.date, class_time: occ.time || '' });
   }
 }
 

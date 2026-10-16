@@ -1,6 +1,6 @@
 import { sellKind } from './_sell-kind.js';
 import Stripe from 'stripe';
-import { attRenewalPass } from './_att-disc.js';
+import { attRenewalPass, attReq, attSummary } from './_att-disc.js';
 // /api/membership-expiry-cron — end memberships whose paid period has run out.
 //
 // WHY THIS EXISTS
@@ -250,10 +250,8 @@ export default async function handler(req, res) {
         const who = m.child_name ? ` (${m.child_name})` : '';
         const plan = m.plan_name ? ` ${m.plan_name}` : '';
         // Co pravidlo chtělo a jak to dopadlo -- obě čísla celá, žádná procenta.
-        const reqCs = [r.needVisits !== null ? `aspoň ${r.needVisits}× trénink` : '', r.allowAbs !== null ? `nejvýš ${r.allowAbs} ${(r.allowAbs >= 1 && r.allowAbs <= 4) ? 'absence' : 'absencí'}` : ''].filter(Boolean).join(' a ');
-        const reqEn = [r.needVisits !== null ? `at least ${r.needVisits} sessions` : '', r.allowAbs !== null ? `at most ${r.allowAbs} absences` : ''].filter(Boolean).join(' and ');
-        const gotCs = `${r.visits}× trénink, ${r.absences} ${r.absences === 1 ? 'absence' : (r.absences >= 2 && r.absences <= 4 ? 'absence' : 'absencí')}`;
-        const gotEn = `${r.visits} session${r.visits === 1 ? '' : 's'}, ${r.absences} absence${r.absences === 1 ? '' : 's'}`;
+        const reqCs = attReq(r, false), reqEn = attReq(r, true);
+        const gotCs = attSummary(r, false), gotEn = attSummary(r, true);
         const cs = r.amount
           ? `🎯 Docházka splněná${who}: ${gotCs}. Další platba${plan} v ${g.name || m.gym_name || 'klubu'} (${when}) bude o ${fmt(r.amount, cur)} nižší: ${fmt(Math.max(0, (Number(m.amount) || 0) - r.amount), cur)} místo ${fmt(m.amount, cur)}.`
           : `📊 Docházka${who}: ${gotCs}. Na slevu ${fmt(r.rule.amt * Math.max(1, parseInt(m.months, 10) || 1), cur)} v ${g.name || m.gym_name || 'klubu'} bylo potřeba ${reqCs} — příští platba (${when}) je v plné výši. V dalším období to jde znovu.`;

@@ -46,15 +46,25 @@ export function attRule(plan) {
   if (!a || !a.on) return null;
   const amt = Math.max(0, Number(a.amt) || 0);
   const num = (v) => (v === null || v === undefined || v === '' || !isFinite(Number(v))) ? null : Math.max(0, Math.floor(Number(v)));
-  const maxAbs = num(a.maxAbs), minVisits = num(a.minVisits);
+  // Platí JEDNO pravidlo (klub ho vybírá přepínačem): nejvýš absencí, nebo aspoň tréninků.
+  const kind = a.kind === 'visits' ? 'visits' : 'abs';
+  const maxAbs = kind === 'abs' ? num(a.maxAbs) : null;
+  const minVisits = kind === 'visits' ? num(a.minVisits) : null;
   if (!(amt > 0) || (maxAbs === null && !(minVisits > 0))) return null;
   return { amt, maxAbs, minVisits: minVisits > 0 ? minVisits : null };
 }
-// Krátké shrnutí výsledku pro texty a Stripe: „8 tréninků, 1 absence".
-export function attSummary(ev) {
-  const t = (n) => (n === 1 ? 'trénink' : (n >= 2 && n <= 4 ? 'tréninky' : 'tréninků'));
-  const a = (n) => (n === 1 ? 'absence' : (n >= 2 && n <= 4 ? 'absence' : 'absencí'));
-  return `${ev.visits} ${t(ev.visits)}, ${ev.absences} ${a(ev.absences)}`;
+const plTr = (n) => (n === 1 ? 'trénink' : (n >= 2 && n <= 4 ? 'tréninky' : 'tréninků'));
+const plAbs = (n) => (n === 1 ? 'absence' : (n >= 2 && n <= 4 ? 'absence' : 'absencí'));
+// Podmínka slevy pro texty: „max. 2 absence" / „min. 8 tréninků".
+export function attReq(ev, en) {
+  if (ev.allowAbs !== null && ev.allowAbs !== undefined) return en ? `max. ${ev.allowAbs} absence${ev.allowAbs === 1 ? '' : 's'}` : `max. ${ev.allowAbs} ${plAbs(ev.allowAbs)}`;
+  return en ? `min. ${ev.needVisits} session${ev.needVisits === 1 ? '' : 's'}` : `min. ${ev.needVisits} ${plTr(ev.needVisits)}`;
+}
+// Krátké shrnutí výsledku pro texty, Stripe a doklad -- jen to, co pravidlo počítá:
+// „1 absence" (pravidlo Max. absence), nebo „8 tréninků" (pravidlo Min. tréninků).
+export function attSummary(ev, en) {
+  if (ev.allowAbs !== null && ev.allowAbs !== undefined) return en ? `${ev.absences} absence${ev.absences === 1 ? '' : 's'}` : `${ev.absences} ${plAbs(ev.absences)}`;
+  return en ? `${ev.visits} session${ev.visits === 1 ? '' : 's'}` : `${ev.visits} ${plTr(ev.visits)}`;
 }
 function addMonths(ms, n) {
   const d = new Date(ms); const day = d.getUTCDate();
