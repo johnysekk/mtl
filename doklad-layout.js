@@ -94,7 +94,7 @@ export function rcptItems(dk) {
 
 // ── TEXTY ────────────────────────────────────────────────────────────────────────────────────
 const TX = {
-  cs: { supplier: 'Dodavatel', customer: 'Odběratel', provider: 'Poskytovatel služby', participant: 'Účastník',
+  cs: { supplier: 'Dodavatel', customer: 'Odběratel', provider: 'Poskytovatel služby', participant: 'Účastník', orderedBy: 'Objednal(a)',
     invNo: 'Číslo faktury', docNo: 'Číslo dokladu', issued: 'Datum vystavení', duzp: 'Datum uskutečnění plnění',
     period: 'Období', subPeriod: 'Období předplatného', billedAs: 'Fakturováno za', method: 'Způsob úhrady', card: 'Platební karta',
     session: 'Termín lekce', payRef: 'Reference platby (Stripe)',
@@ -116,7 +116,7 @@ const TX = {
     noSnap: 'Nebudeme ho skládat z dnešních dat — nebyl by to doklad, který byl vystaven. Částky najdeš v účetnictví.',
     studentNote: 'Platné potvrzení o zaplacení pro tvé účely. Poskytovatel služby je uveden výše. MTL platbu jen zprostředkovává. Potřebuješ formální daňový doklad (fakturu)? Vyžádej si ho u poskytovatele. Vygenerováno přes MTL.',
     payment: 'Platba', invoice: 'faktura', invoices: 'faktury' },
-  en: { supplier: 'Supplier', customer: 'Customer', provider: 'Service provider', participant: 'Participant',
+  en: { supplier: 'Supplier', customer: 'Customer', provider: 'Service provider', participant: 'Participant', orderedBy: 'Ordered by',
     invNo: 'Invoice no.', docNo: 'Document no.', issued: 'Issued', duzp: 'Date of supply',
     period: 'Period', subPeriod: 'Subscription period', billedAs: 'Billed as', method: 'Payment method', card: 'Payment card',
     session: 'Session date', payRef: 'Payment ref (Stripe)',
@@ -291,7 +291,14 @@ export function studentModel(dk, lang, opts) {
   // Odběratel = kdo platil; účastník jen když se liší (zástupce platí za mladistvého).
   const payer = String(dk.cust_name || '').trim(), part = String(dk.participant_name || '').trim();
   const buyer = payer || part || '—', participant = (part && part !== payer) ? part : '';
-  m.parties = [{ label: T.provider, lines: sup }, { label: T.customer, lines: [buyer, participant ? (T.participant + ': ' + participant) : ''].filter(Boolean) }];
+  // NÁKUP NA FIRMU: odběratel je firma (sídlo, IČO, DIČ), pod ní kdo objednal a účastník.
+  const co = String(dk.cust_company || '').trim();
+  const custLines = co
+    ? [co, dk.cust_address || '', dk.cust_country ? countryName(dk.cust_country, lang) : '',
+       dk.cust_ico ? (T.regno + ': ' + dk.cust_ico) : '', dk.cust_dic ? (T.vatid + ': ' + dk.cust_dic) : '',
+       (payer || part) ? (T.orderedBy + ': ' + (payer || part)) : '', participant ? (T.participant + ': ' + participant) : '']
+    : [buyer, participant ? (T.participant + ': ' + participant) : ''];
+  m.parties = [{ label: T.provider, lines: sup }, { label: T.customer, lines: custLines.filter(Boolean) }];
   const isPayer = !!dk.sup_vat_payer, rate = isPayer ? (dk.sup_vat_rate != null ? Number(dk.sup_vat_rate) : 21) : 0;
   // Termín lekce, ne datum plnění: platba předem = plnění dnem platby; termín se přesunem mění.
   const sess = String(dk.session_at || '').trim(), sDate = sess.slice(0, 10), sTime = sess.slice(11).trim();
