@@ -98,13 +98,15 @@ async function notifyPeople(kind, target, people, skip) {
   const todo = people.filter((p) => ids.includes(p.user_id) && !done.has(String(p.user_id)));
   const langs = {};
   for (let i = 0; i < todo.length; i += 150) {
-    ((await sbGet(`profiles?id=in.(${todo.slice(i, i + 150).map((p) => q(p.user_id)).join(',')})&select=id,lang,email,deleted_at`)) || [])
+    ((await sbGet(`profiles?id=in.(${todo.slice(i, i + 150).map((p) => q(p.user_id)).join(',')})&select=id,lang,email,purged_at,banned`)) || [])
       .forEach((p) => { langs[p.id] = p; });
   }
   let notified = 0, emailed = 0;
   for (const p of todo) {
     const pr = langs[p.user_id] || {};
-    if (pr.deleted_at) continue;
+    // Smazaný účet (po 30 dnech, purged_at) ani zabanovaný nic nedostane. Kdo o výmaz jen požádal
+    // a lhůta ještě běží, dostane upozornění normálně -- účet pořád má.
+    if (!langs[p.user_id] || pr.purged_at || pr.banned) continue;
     const km = Math.max(1, Math.round(p.km));
     const disc = [...p.discs][0] || '';
     const from = p.city || '';
