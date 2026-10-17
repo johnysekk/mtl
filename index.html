@@ -2905,6 +2905,8 @@ input[type="date"]::-webkit-date-and-time-value{ text-align:left; }
         <input class="loc-inp" id="cityInp" type="text" placeholder="Např. Praha, Brno, Ostrava...">
       </div>
     </div>
+    <!-- Prohlížení jinde: seznam měst, kde v MTL je klub nebo kouč (_renderBrowseCities). -->
+    <div id="cityList" style="display:none;margin:-14px 0 18px;text-align:left;max-height:230px;overflow-y:auto;border:1px solid var(--border);border-radius:12px;background:#fff;"></div>
     <p id="cityCcNote" style="font-size:11.5px;color:var(--light);line-height:1.45;margin:0 0 16px;text-align:left;display:none;"></p>
     <button class="btn-gps-allow" id="btnCityOk">Potvrdit město</button>
     <button class="btn-gps-deny" id="btnCityCancel">Zrušit</button>
@@ -32971,7 +32973,15 @@ function _fillCityCountries(){
     // Prohlížení: země je volba, do profilu se nic nezapisuje.
     sel.disabled=false; sel.style.opacity='';
     sel.innerHTML=list.map(function(c){ return '<option value="'+c[0]+'"'+(c[0]===cur?' selected':'')+'>'+escapeHtml(_nm(c))+'</option>'; }).join('');
-    sel.onchange=null;
+    // Jen země, kde v MTL něco je (vlastní zůstává vždy). Po změně země se načte její seznam měst.
+    sel.onchange=function(){ try{ $('cityInp').value=''; $('cityInp')._place=null; _renderBrowseCities(); }catch(e){} };
+    _browseCountrySet().then(function(has){
+      if(!has || !has.size || window._cityMode!=='browse') return;
+      const keep=sel.value;
+      const l2=list.filter(function(c){ return has.has(c[0]) || c[0]===cur; });
+      sel.innerHTML=l2.map(function(c){ return '<option value="'+c[0]+'"'+(c[0]===keep?' selected':'')+'>'+escapeHtml(_nm(c))+'</option>'; }).join('');
+      if(sel.value!==keep) _renderBrowseCities();
+    }).catch(function(){});
     if(note){
       note.style.display='block';
       note.textContent=EN ? 'Temporary \u2014 your saved location and country stay as they are.'
@@ -32986,15 +32996,18 @@ function openCityInput(mode){
   // neuložilo nic.
   window._cityMode = (mode === 'browse') ? 'browse' : 'set';
   $('cityInp').value=''; $('cityInp')._place=null;
-  // Prohlížení jinde: jen města, kde v MTL něco je. Vlastní poloha: jakékoli místo v zemi.
-  $('cityInp')._localSource = (window._cityMode==='browse') ? _browseCitySource : null;
+  // Prohlížení jinde: seznam měst, kde v MTL něco je (pod polem, filtruje se psaním).
+  // Vlastní poloha: našeptávač jakéhokoli místa v zemi.
+  $('cityInp')._localSource = null;
+  $('cityInp')._noSuggest = (window._cityMode==='browse');
   // Našeptávač obcí a jejich částí, jen v zemi: při nastavení v domovské, při prohlížení ve vybrané.
   try{ _attachPlaceSuggest($('cityInp'), function(){
     if(window._cityMode==='browse') return String(($('cityCountry')&&$('cityCountry').value)||'');
     return String((currentUser&&(currentUser.country_code||currentUser.residence_country))||($('cityCountry')&&$('cityCountry').value)||'');
   }); }catch(e){}
   try{ _fillCityCountries(); }catch(e){}
-  try{ if(typeof ensureOpenCountries==='function') ensureOpenCountries().then(function(){ try{ _fillCityCountries(); }catch(e){} }); }catch(e){}
+  try{ _renderBrowseCities(); }catch(e){}
+  try{ if(typeof ensureOpenCountries==='function') ensureOpenCountries().then(function(){ try{ _fillCityCountries(); _renderBrowseCities(); }catch(e){} }); }catch(e){}
   $('cityOv').classList.add('open');
   setTimeout(()=>$('cityInp').focus(),350);
 }
@@ -51655,6 +51668,37 @@ function _placeFromResult(x){
 function _normTxt(t){ try{ return String(t||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim(); }catch(e){ return String(t||'').toLowerCase().trim(); } }
 // Města v zemi, kde v MTL je viditelný klub (adresa provozovny) nebo kouč (jeho město).
 // Bod města = průměr bodů klubů a koučů v něm. Drží se 10 minut na zemi.
+// Seznam měst pod polem při prohlížení jinde -- vidět hned, psaní ho jen filtruje. Klepnutí
+// na město ho rovnou nastaví. Při nastavování vlastní polohy se seznam neukazuje.
+async function _renderBrowseCities(){
+  const box=$('cityList'), inp=$('cityInp'); if(!box || !inp) return;
+  if(window._cityMode!=='browse'){ box.style.display='none'; box.innerHTML=''; inp.oninput=null; return; }
+  const EN=LANG==='en';
+  const cc=String(($('cityCountry')&&$('cityCountry').value)||'').toUpperCase();
+  box.style.display='block'; box.innerHTML='<div style="padding:10px 12px;font-size:12.5px;color:var(--light);">'+L('Načítám...')+'</div>';
+  const all=await _browseCitySource(cc);
+  const paint=function(){
+    const nv=_normTxt(inp.value||'');
+    const rows=(all||[]).filter(function(c){ return !nv || _normTxt(c.label).indexOf(nv)>=0; });
+    if(!rows.length){ box.innerHTML='<div style="padding:10px 12px;font-size:12.5px;color:var(--mid);line-height:1.45;">'+((all&&all.length)?(EN?'No such city with a club or coach in MTL.':'Takové m\u011bsto s klubem nebo kou\u010dem v MTL nen\u00ed.'):(EN?'Nothing in MTL in this country yet.':'V t\u00e9hle zemi zat\u00edm v MTL nic nen\u00ed.'))+'</div>'; return; }
+    box.innerHTML=rows.slice(0,60).map(function(c,i){ return '<div class="bcRow" data-i="'+i+'" style="padding:10px 12px;cursor:pointer;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;gap:8px;align-items:center;"><span style="font-size:14px;font-weight:700;color:var(--dark);">'+escapeHtml(c.label)+'</span><span style="font-size:11.5px;color:var(--mid);white-space:nowrap;">'+escapeHtml(c.sub||'')+'</span></div>'; }).join('');
+    box.querySelectorAll('.bcRow').forEach(function(r){ r.onclick=function(){ const c=rows[Number(r.dataset.i)]; if(!c) return;
+      inp.value=c.label; inp._place={ lat:c.lat, lng:c.lng, label:c.label, city:c.label, district:'', cc:c.cc, country:null, precision:'city' };
+      try{ confirmCity(); }catch(e){} }; });
+  };
+  inp.oninput=paint; paint();
+}
+// Země, kde v MTL je aspoň jeden viditelný klub nebo kouč (nabídka zemí při prohlížení jinde).
+async function _browseCountrySet(){
+  if(window._bcCountries && Date.now()-window._bcCountries.at<600000) return window._bcCountries.set;
+  const set=new Set();
+  try{ const { data }=await supaClient.from('gyms_pub').select('country_code,deleted_at,paused_at,suspended,account_suspended').eq('status','approved').not('city_lat','is',null).limit(10000);
+    (data||[]).forEach(function(g){ if(g.country_code && !_entHidden('gym', g)) set.add(String(g.country_code).toUpperCase()); }); }catch(e){}
+  try{ const { data }=await supaClient.from('profiles_pub').select('country_code,deleted_at,coach_closing_at,coach_paused_at,deactivated_at,account_suspended').eq('coach_status','approved').not('city_lat','is',null).limit(10000);
+    (data||[]).forEach(function(p){ if(p.country_code && !_entHidden('coach', p)) set.add(String(p.country_code).toUpperCase()); }); }catch(e){}
+  window._bcCountries={ at:Date.now(), set:set };
+  return set;
+}
 async function _browseCitySource(cc){
   cc=String(cc||'').toUpperCase(); if(!cc) return [];
   window._bcCache=window._bcCache||{};
@@ -51684,6 +51728,7 @@ function _attachPlaceSuggest(el, ccGetter, onPick){
   const hide=function(){ box.style.display='none'; };
   let _t=null, _last='', _seq=0;
   const search=async function(){
+    if(el._noSuggest){ hide(); return; }
     const v=String(el.value||'').trim();
     const _min=(typeof el._localSource==='function')?1:3;
     if(v.length<_min || v===_last){ if(v.length<_min) hide(); return; }
