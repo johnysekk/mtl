@@ -10,7 +10,9 @@
 //   secret  { factor_id, secret }  -- po zapnutí 2FA (přihlášení s kódem) uloží klíč
 //   trust                         -- po zadání kódu s „už nepožadovat": vrátí { token }
 //   code    { device_token }       -- přihlášení na důvěryhodném zařízení: vrátí { code, factor_id }
-//   devices                       -- počet důvěryhodných zařízení
+//   devices { device_token? }     -- seznam důvěryhodných zařízení [{ id, name, created_at,
+//                                    last_used_at, current }] (current = to, ze kterého se ptá)
+//   revoke_one { id }             -- zruší jedno zařízení
 //   revoke                        -- zruší všechna důvěryhodná zařízení
 //   forget                        -- po vypnutí 2FA smaže klíč i zařízení
 // Tabulky: public.mtl_mfa_secrets, public.mtl_mfa_devices (sql/mfa.sql), jen pro server.
@@ -56,6 +58,22 @@ async function sbGet(path) { const r = await fetch(`${SB}/rest/v1/${path}`, { he
 async function sbSend(method, path, body, prefer) {
   const r = await fetch(`${SB}/rest/v1/${path}`, { method, headers: { ...svc, Prefer: prefer || 'return=minimal' }, body: body ? JSON.stringify(body) : undefined });
   if (!r.ok) throw new Error(`db ${r.status} ${await r.text()}`);
+}
+// Čitelný název zařízení z prohlížeče: „iPhone · Safari", „Mac · Chrome", „Windows · Edge".
+// Přesný model (iPhone 15) ani verzi macOS prohlížeč neprozradí -- Apple je záměrně skrývá.
+function deviceName(ua) {
+  ua = String(ua || '');
+  let os = 'Zařízení';
+  if (/iPhone/.test(ua)) os = 'iPhone';
+  else if (/iPad/.test(ua)) os = 'iPad';
+  else if (/Android/.test(ua)) { const m = ua.match(/Android[^;)]*;\s*([^;)]+?)\s*(?:Build|\))/); os = (m && m[1] && m[1] !== 'K') ? ('Android · ' + m[1]) : 'Android'; }
+  else if (/Macintosh|Mac OS X/.test(ua)) os = 'Mac';
+  else if (/Windows/.test(ua)) os = 'Windows';
+  else if (/CrOS/.test(ua)) os = 'Chromebook';
+  else if (/Linux/.test(ua)) os = 'Linux';
+  const br = /EdgA?\/|EdgiOS/.test(ua) ? 'Edge' : /OPR\//.test(ua) ? 'Opera' : /SamsungBrowser/.test(ua) ? 'Samsung Internet'
+    : /CriOS|Chrome\//.test(ua) ? 'Chrome' : /FxiOS|Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : '';
+  return br ? `${os} · ${br}` : os;
 }
 function aalOf(token) {
   try { const p = String(token).split('.')[1] || ''; return JSON.parse(Buffer.from(p.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')).aal || 'aal1'; }
@@ -113,8 +131,17 @@ export default async function handler(req, res) {
     }
     if (action === 'devices') {
       if (!aal2) return res.status(403).json({ error: 'mfa_required' });
-      const rows = await sbGet(`mtl_mfa_devices?user_id=eq.${q(uid)}&expires_at=gt.${q(new Date().toISOString())}&select=id`);
-      return res.status(200).json({ ok: true, count: (rows || []).length });
+      const rows = await sbGet(`mtl_mfa_devices?user_id=eq.${q(uid)}&expires_at=gt.${q(new Date().toISOString())}&select=id,label,token_hash,created_at,last_used_at&order=created_at.desc`);
+      const mine = b.device_token ? sha(String(b.device_token)) : null;
+      const list = (rows || []).map((r) => ({ id: r.id, name: deviceName(r.label), created_at: r.created_at, last_used_at: r.last_used_at, current: !!(mine && r.token_hash === mine) }));
+      return res.status(200).json({ ok: true, count: list.length, devices: list });
+    }
+    if (action === 'revoke_one') {
+      if (!aal2) return res.status(403).json({ error: 'mfa_required' });
+      const id = String(b.id || '');
+      if (!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({ error: 'bad_id' });
+      await sbSend('DELETE', `mtl_mfa_devices?user_id=eq.${q(uid)}&id=eq.${q(id)}`);
+      return res.status(200).json({ ok: true });
     }
     if (action === 'revoke') {
       if (!aal2) return res.status(403).json({ error: 'mfa_required' });
