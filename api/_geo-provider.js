@@ -72,6 +72,7 @@ async function osmSearch(q, o, base, key) {
   return (Array.isArray(d) ? d : []).map((x) => ({
     display_name: x.display_name, lat: x.lat, lon: x.lon, boundingbox: x.boundingbox || null,
     address: x.address || {}, type: x.addresstype || x.type, class: x.class, precision: nomPrecision(x),
+    osm_type: x.osm_type || null, osm_id: x.osm_id || null,
   }));
 }
 async function osmReverse(lat, lon, o, base, key) {
@@ -110,7 +111,8 @@ async function photonPlaces(q, o) {
       country_code: String(pr.countrycode || '').toLowerCase() || undefined };
     const ex = pr.extent;
     return { display_name: [pr.name, isCity ? null : pr.city, pr.state, pr.country].filter(Boolean).join(', '), lat: String(c[1]), lon: String(c[0]),
-      boundingbox: ex ? [String(ex[3]), String(ex[1]), String(ex[0]), String(ex[2])] : null, address, type: t, class: 'photon', precision: PH_PREC[t] || 'city' };
+      boundingbox: ex ? [String(ex[3]), String(ex[1]), String(ex[0]), String(ex[2])] : null, address, type: t, class: 'photon', precision: PH_PREC[t] || 'city',
+      osm_type: ({ R: 'relation', W: 'way', N: 'node' })[pr.osm_type] || null, osm_id: pr.osm_id || null };
   });
 }
 async function liqAutocomplete(q, o) {
@@ -124,7 +126,8 @@ async function liqAutocomplete(q, o) {
     const a = Object.assign({}, x.address || {});
     if (DISTRICT.includes(String(x.type || '')) && a.name && !a.suburb) a.suburb = a.name;
     if (CITY.includes(String(x.type || '')) && a.name && !a.city) a.city = a.name;
-    return { display_name: x.display_name, lat: x.lat, lon: x.lon, boundingbox: x.boundingbox || null, address: a, type: x.type, class: x.class, precision: nomPrecision({ address: a, type: x.type }) };
+    return { display_name: x.display_name, lat: x.lat, lon: x.lon, boundingbox: x.boundingbox || null, address: a, type: x.type, class: x.class, precision: nomPrecision({ address: a, type: x.type }),
+      osm_type: x.osm_type || null, osm_id: x.osm_id || null };
   });
 }
 
