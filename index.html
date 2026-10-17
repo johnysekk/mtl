@@ -55389,8 +55389,14 @@ async function openSecuritySettings(){
   ov.onclick=function(e){ if(e.target===ov) close(); };
   document.body.appendChild(ov);
   const head='<div style="font-size:18px;font-weight:800;color:var(--dark);margin-bottom:6px;">🔐 '+(EN?'Two-step verification':'Dvoufázové ověření')+'</div>';
-  const cancel='<button class="mfaClose" style="'+_mfaBtnCss+'background:none;color:var(--mid);font-weight:600;margin-top:6px;">'+(EN?'Close':'Zavřít')+'</button>';
-  const wire=function(){ ov.querySelectorAll('.mfaClose').forEach(function(b){ b.onclick=close; }); };
+  // ODHLÁSIT VŠUDE: ukončí přihlášení na všech telefonech a počítačích (i tady). Pro ztracený
+  // telefon nebo když člověk tuší, že se někdo dostal k heslu.
+  const cancel='<button class="mfaAllOut" style="'+_mfaBtnCss+'background:#fff;color:var(--red);border:1.5px solid var(--border);margin-top:10px;">'+(EN?'Log out on all devices':'Odhlásit se na všech zařízeních')+'</button>'
+    +'<button class="mfaClose" style="'+_mfaBtnCss+'background:none;color:var(--mid);font-weight:600;margin-top:6px;">'+(EN?'Close':'Zavřít')+'</button>';
+  const wire=function(){ ov.querySelectorAll('.mfaClose').forEach(function(b){ b.onclick=close; });
+    ov.querySelectorAll('.mfaAllOut').forEach(function(b){ b.onclick=async function(){
+      if(!confirm(EN?'Log out on all phones and computers, including this one?':'Odhlásit tě na všech telefonech a počítačích, včetně tohoto?')) return;
+      try{ await supaClient.auth.signOut({ scope:'global' }); }catch(e){} location.reload(); }; }); };
   if(st.totp){
     ov.innerHTML='<div style="'+_mfaBoxCss+'">'+head
       +'<div style="font-size:13.5px;color:var(--green);font-weight:700;margin-bottom:8px;">✓ '+(EN?'On — after your password we ask for a code from your authenticator app.':'Zapnuto — po hesle chceme kód z ověřovací aplikace.')+'</div>'
@@ -55400,9 +55406,22 @@ async function openSecuritySettings(){
       +'<div id="mfaOffErr" style="display:none;color:var(--red);font-size:13px;font-weight:600;margin:-4px 0 10px;"></div>'
       +'<button id="mfaOffGo" style="'+_mfaBtnCss+'background:var(--dark);color:#fff;">'+(EN?'Turn off 2FA':'Vypnout 2FA')+'</button>'+cancel+'</div>';
     wire();
-    (async function(){ const d=await _mfaApi({ action:'devices' }); const row=ov.querySelector('#mfaDevRow'); if(!row) return; const n=Number(d.count)||0;
-      row.innerHTML=(EN?'Devices where the code is not asked: ':'Zařízení, kde se kód nechce: ')+'<b>'+n+'</b>'+(n?(' \u00b7 <span id="mfaRevoke" style="color:var(--red);text-decoration:underline;cursor:pointer;">'+(EN?'cancel all':'zrušit všechna')+'</span>'):'');
-      const rv=row.querySelector('#mfaRevoke'); if(rv) rv.onclick=async function(){ const r=await _mfaApi({ action:'revoke' }); if(r.ok){ try{ localStorage.removeItem('mtl_mfa_dev_'+(await _mfaUid())); }catch(e){} row.innerHTML=(EN?'Devices where the code is not asked: ':'Zařízení, kde se kód nechce: ')+'<b>0</b>'; toast(EN?'Done \u2014 the code will be asked everywhere':'Hotovo \u2014 kód se bude chtít všude',1); } }; })();
+    (async function(){
+      const row=ov.querySelector('#mfaDevRow'); if(!row) return;
+      const uid=await _mfaUid(); let mineTok=''; try{ mineTok=localStorage.getItem('mtl_mfa_dev_'+uid)||''; }catch(e){}
+      const paintDev=async function(){
+        const d=await _mfaApi({ action:'devices', device_token:mineTok||undefined }); const list=(d&&d.devices)||[];
+        const fd=function(x){ try{ return x?new Date(x).toLocaleDateString(EN?'en-GB':'cs-CZ'):''; }catch(e){ return ''; } };
+        row.innerHTML='<div style="font-weight:700;color:var(--dark);margin-bottom:6px;">'+(EN?'Devices where the code is not asked':'Zařízení, kde se kód nechce')+'</div>'
+          +(list.length?list.map(function(x){ return '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-top:1px solid var(--border);"><div><div style="font-weight:700;color:var(--dark);">'+escapeHtml(x.name||'')+(x.current?(' <span style="font-weight:600;color:var(--green);font-size:12px;">'+(EN?'(this device)':'(toto zařízení)')+'</span>'):'')+'</div><div style="font-size:11.5px;color:var(--light);">'+(EN?'added ':'přidáno ')+fd(x.created_at)+(x.last_used_at?((EN?' · last used ':' · naposledy ')+fd(x.last_used_at)):'')+'</div></div><span class="mfaRm" data-id="'+escapeHtml(x.id)+'" data-cur="'+(x.current?1:0)+'" style="color:var(--red);font-size:12.5px;font-weight:700;text-decoration:underline;cursor:pointer;flex:none;">'+(EN?'Remove':'Odebrat')+'</span></div>'; }).join('')
+            :('<div style="font-size:12.5px;color:var(--light);">'+(EN?'None \u2014 the code is asked on every device.':'Žádné \u2014 kód se chce na každém zařízení.')+'</div>'));
+        row.querySelectorAll('.mfaRm').forEach(function(el){ el.onclick=async function(){
+          const r=await _mfaApi({ action:'revoke_one', id:el.dataset.id });
+          if(r.ok){ if(el.dataset.cur==='1'){ try{ localStorage.removeItem('mtl_mfa_dev_'+uid); }catch(e){} mineTok=''; } paintDev(); }
+          else toast('\u26a0\ufe0f '+(r.error||'')); }; });
+      };
+      paintDev();
+    })();
     const ci=ov.querySelector('#mfaOffCode'), er=ov.querySelector('#mfaOffErr');
     ci.oninput=function(){ ci.value=String(ci.value||'').replace(/\D/g,'').slice(0,6); };
     ov.querySelector('#mfaOffGo').onclick=async function(){
