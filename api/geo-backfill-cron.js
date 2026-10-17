@@ -6,13 +6,13 @@
 // Dřív to zůstalo prázdné navždy; tenhle cron to dorovná bez zásahu člověka.
 //
 // Běží denně. Zpracuje nejvýš 20 záznamů za jeden běh, mezi dotazy sekunda pauzy --
-// OSM to po nás chce a rychlost tady není potřeba.
+// OSM to po nás chce a rychlost tady není potřeba. Poskytovatele map určuje _geo-provider.js.
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const svc = { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' };
-const UA = process.env.GEO_USER_AGENT
-  || 'MartialTrainingLab/1.0 (+https://app.martialtraininglab.com; info@martialtraininglab.com)';
+import { geoLocate } from './_geo-provider.js';
+import { ccOf } from './_country.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -27,17 +27,6 @@ const sbPatch = async (path, body) => {
   return r.ok;
 };
 
-async function geocode(q, cc) {
-  const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q)
-    + (cc ? '&countrycodes=' + encodeURIComponent(String(cc).toLowerCase()) : '');
-  const r = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
-  if (!r.ok) { console.error('[geo-backfill] nominatim', r.status, q.slice(0, 60)); return null; }
-  const d = await r.json();
-  if (!Array.isArray(d) || !d.length) return null;
-  const lat = parseFloat(d[0].lat), lng = parseFloat(d[0].lon);
-  return (isFinite(lat) && isFinite(lng)) ? { lat, lng } : null;
-}
-
 export default async function handler(req, res) {
   // JEN VERCEL CRON. Bez tajného klíče by úlohu spustil kdokoli, kdo zná adresu.
   const _cron = (process.env.CRON_SECRET || '').trim();
@@ -45,28 +34,23 @@ export default async function handler(req, res) {
   if (String(req.headers.authorization || '') !== `Bearer ${_cron}`) return res.status(401).json({ error: 'unauthorized' });
   let done = 0, failed = 0;
   try {
-    // Nejdřív adresa, pak město, pak jen země: čím přesnější, tím lepší, ale i hrubý bod
-    // je lepší než žádný -- s ním klub aspoň existuje na mapě a v řazení.
-    const gyms = await sbGet('gyms?select=id,name,address,city,country,country_code'
+    // Nejdřív přesná adresa, pak obec -- VŽDY uvnitř země klubu (cc je podmínka, ne nápověda).
+    // Střed státu se nikdy neuloží: klub uprostřed země by rozbil všechny vzdálenosti a
+    // upozornění v okolí. Bez nalezeného bodu klub počká, až majitel adresu opraví.
+    const gyms = await sbGet('gyms?select=id,name,address,postal_code,city,country,country_code,billing_country'
       + '&deleted_at=is.null&city_lat=is.null&limit=20');
 
     for (const g of (gyms || [])) {
-      const tries = [
-        [g.address, g.city, g.country].filter(Boolean).join(', '),
-        [g.city, g.country].filter(Boolean).join(', '),
-        g.country || '',
-      ].filter((x) => x && x.length > 2);
-
+      const cc = ccOf(g.country_code || g.country || g.billing_country || '');
+      if (!cc) { failed++; console.log('[geo-backfill] klub bez země:', g.id, g.name); continue; }
       let hit = null;
-      for (const q of tries) {
-        hit = await geocode(q);
-        await sleep(1000);
-        if (hit) break;
-      }
+      try { hit = await geoLocate({ street: g.address, city: g.city, postal: g.postal_code, cc }); } catch (e) { console.error('[geo-backfill]', e.message); }
+      await sleep(1100);
       if (!hit) { failed++; console.log('[geo-backfill] nenalezeno:', g.id, g.name); continue; }
 
-      const ok = await sbPatch(`gyms?id=eq.${encodeURIComponent(g.id)}`, { city_lat: hit.lat, city_lng: hit.lng });
-      if (ok) { done++; console.log('[geo-backfill] doplněno:', g.id, g.name, hit.lat, hit.lng); }
+      const ok = await sbPatch(`gyms?id=eq.${encodeURIComponent(g.id)}`, { city_lat: hit.lat, city_lng: hit.lng, geo_precision: hit.precision })
+        || await sbPatch(`gyms?id=eq.${encodeURIComponent(g.id)}`, { city_lat: hit.lat, city_lng: hit.lng });
+      if (ok) { done++; console.log('[geo-backfill] doplněno:', g.id, g.name, hit.lat, hit.lng, hit.precision); }
       else failed++;
     }
 
@@ -76,18 +60,16 @@ export default async function handler(req, res) {
     const orgs = left ? await sbGet('organizations?select=id,name,address,billing_line1,billing_city,city,billing_country,country'
       + '&city_lat=is.null&city=not.is.null&limit=' + left) : [];
     for (const o of (orgs || [])) {
-      const cc = o.billing_country || o.country || '';
+      const cc = ccOf(o.billing_country || o.country || '');
       const city = (o.address ? o.city : (o.billing_city || o.city)) || '';
       const street = o.address || o.billing_line1 || '';
-      const tries = [[street, city].filter(Boolean).join(', '), city].filter((x) => x && x.length > 2);
+      if (!cc) { failed++; continue; }
       let hit = null;
-      for (const q of tries) {
-        hit = await geocode(q, cc);
-        await sleep(1000);
-        if (hit) break;
-      }
+      try { hit = await geoLocate({ street, city, cc }); } catch (e) { console.error('[geo-backfill] org', e.message); }
+      await sleep(1100);
       if (!hit) { failed++; console.log('[geo-backfill] org nenalezena:', o.id, o.name); continue; }
-      const ok = await sbPatch(`organizations?id=eq.${encodeURIComponent(o.id)}`, { city_lat: hit.lat, city_lng: hit.lng });
+      const ok = await sbPatch(`organizations?id=eq.${encodeURIComponent(o.id)}`, { city_lat: hit.lat, city_lng: hit.lng, geo_precision: hit.precision })
+        || await sbPatch(`organizations?id=eq.${encodeURIComponent(o.id)}`, { city_lat: hit.lat, city_lng: hit.lng });
       if (ok) { done++; console.log('[geo-backfill] org doplněna:', o.id, o.name, hit.lat, hit.lng); }
       else failed++;
     }

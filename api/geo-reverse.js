@@ -10,8 +10,8 @@
 // Souřadnice se zaokrouhlují na dvě desetinná místa (~1 km). Na město to stačí a výrazně
 // to zvyšuje zásah keše: deset lidí ze stejné čtvrti se zeptá jednou.
 
-const UA = process.env.GEO_USER_AGENT
-  || 'MartialTrainingLab/1.0 (+https://app.martialtraininglab.com; info@martialtraininglab.com)';
+// Kdo odpovídá (OpenStreetMap, LocationIQ, Mapbox, Google), určuje _geo-provider.js.
+import { geoReverse, providerName } from './_geo-provider.js';
 
 const CACHE = new Map();
 const TTL = 24 * 60 * 60 * 1000;   // město se nestěhuje, den je bezpečný
@@ -43,7 +43,7 @@ export default async function handler(req, res) {
 
   const rlat = Math.round(lat * 100) / 100;
   const rlon = Math.round(lon * 100) / 100;
-  const key = lang + '|' + zoom + '|' + rlat + '|' + rlon;
+  const key = providerName() + '|' + lang + '|' + zoom + '|' + rlat + '|' + rlon;
 
   const hit = cacheGet(key);
   if (hit) {
@@ -52,29 +52,14 @@ export default async function handler(req, res) {
   }
 
   try {
-    const url = 'https://nominatim.openstreetmap.org/reverse'
-      + '?format=json&addressdetails=1&zoom=' + zoom
-      + '&accept-language=' + encodeURIComponent(lang)
-      + '&lat=' + rlat + '&lon=' + rlon;
-
-    const r = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
-    if (!r.ok) {
-      console.error('[geo-reverse] nominatim', r.status, rlat, rlon);
-      res.setHeader('Cache-Control', 'no-store');
-      return res.status(502).json({ error: 'geocoder_unavailable', status: r.status });
-    }
-    const d = await r.json();
-    const out = {
-      display_name: d && d.display_name,
-      address: (d && d.address) || {},
-      lat: rlat, lon: rlon,
-    };
+    const r = await geoReverse(rlat, rlon, { zoom, lang });
+    const out = { display_name: r.display_name, address: r.address || {}, lat: rlat, lon: rlon, precision: r.precision || null, provider: r.provider };
     cacheSet(key, out);
     res.setHeader('Cache-Control', 'public, max-age=3600');
     return res.status(200).json(out);
   } catch (e) {
-    console.error('[geo-reverse]', (e && e.message) || e);
+    console.error('[geo-reverse]', providerName(), (e && e.status) || '', (e && e.message) || e);
     res.setHeader('Cache-Control', 'no-store');
-    return res.status(502).json({ error: 'geocoder_unavailable' });
+    return res.status(502).json({ error: 'geocoder_unavailable', status: (e && e.status) || null });
   }
 }

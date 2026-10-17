@@ -8,11 +8,11 @@
 // Tady se dotaz posílá jménem MTL s vlastní hlavičkou a výsledek se krátce drží v paměti,
 // takže při psaní adresy neodejde dvacet dotazů, ale jeden nebo dva.
 //
-// GET /api/geo-search?q=Cejl%2068&city=Brno&lang=cs
-// → [{ display_name, lat, lon, address:{...} }, ...]
-
-const UA = process.env.GEO_USER_AGENT
-  || 'MartialTrainingLab/1.0 (+https://app.martialtraininglab.com; info@martialtraininglab.com)';
+// GET /api/geo-search?q=Cejl%2068&city=Brno&lang=cs&cc=cz&kind=address|place
+// → [{ display_name, lat, lon, address:{...}, boundingbox, precision, provider }, ...]
+// kind=place: jen obce, městské části a čtvrti (výběr města / místa v poptávce).
+// Kdo odpovídá (OpenStreetMap, LocationIQ, Mapbox, Google), určuje _geo-provider.js.
+import { geoSearch, providerName } from './_geo-provider.js';
 
 // Paměť procesu. Vercel funkce žijí krátce, takže je to malá, ale účinná pojistka proti
 // opakovaným dotazům při psaní. Bez limitu by tu při dlouhém běhu narůstal objem.
@@ -46,12 +46,13 @@ export default async function handler(req, res) {
   // se nevrátí vůbec. Bere i seznam oddělený čárkou („cz,sk").
   const cc = String((req.query && req.query.cc) || '')
     .toLowerCase().replace(/[^a-z,]/g, '').slice(0, 64);
+  const kind = (req.query && req.query.kind) === 'place' ? 'place' : null;
 
   // Krátké dotazy nemá smysl posílat dál: vrátí půl města a stejně se přepisují.
   if (q.length < 3) { res.setHeader('Cache-Control', 'no-store'); return res.status(200).json([]); }
 
   const full = q + (city && q.toLowerCase().indexOf(city.toLowerCase()) < 0 ? (', ' + city) : '');
-  const key = lang + '|' + limit + '|' + cc + '|' + full.toLowerCase();
+  const key = providerName() + '|' + lang + '|' + limit + '|' + cc + '|' + (kind || '') + '|' + full.toLowerCase();
 
   const hit = cacheGet(key);
   if (hit) {
@@ -60,37 +61,15 @@ export default async function handler(req, res) {
   }
 
   try {
-    const url = 'https://nominatim.openstreetmap.org/search'
-      + '?format=json&addressdetails=1&limit=' + limit
-      + (cc ? '&countrycodes=' + cc : '')
-      + '&accept-language=' + encodeURIComponent(lang)
-      + '&q=' + encodeURIComponent(full);
-
-    const r = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
-    if (!r.ok) {
-      // Nesnažíme se to maskovat: appka pak nabídne ruční zadání.
-      console.error('[geo-search] nominatim', r.status, full.slice(0, 80));
-      res.setHeader('Cache-Control', 'no-store');
-      return res.status(502).json({ error: 'geocoder_unavailable', status: r.status });
-    }
-    const d = await r.json();
-
-    // Posíláme jen to, co našeptávač potřebuje. Menší odpověď, žádná cizí data v appce.
-    const out = (Array.isArray(d) ? d : []).slice(0, limit).map((x) => ({
-      display_name: x.display_name,
-      lat: x.lat, lon: x.lon,
-      // Obálka se posílá dál: plní se z ní country_codes.lat_min/lat_max/... (sql-83).
-      boundingbox: x.boundingbox || null,
-      address: x.address || {},
-      type: x.type, class: x.class,
-    }));
-
+    // Posíláme jen to, co appka potřebuje (tvar Nominatimu + přesnost a poskytovatel).
+    const out = (await geoSearch(full, { cc, lang, limit, kind })).slice(0, limit);
     cacheSet(key, out);
     res.setHeader('Cache-Control', 'public, max-age=120');
     return res.status(200).json(out);
   } catch (e) {
-    console.error('[geo-search]', (e && e.message) || e);
+    // Nesnažíme se to maskovat: appka pak nabídne ruční zadání.
+    console.error('[geo-search]', providerName(), (e && e.status) || '', (e && e.message) || e, full.slice(0, 80));
     res.setHeader('Cache-Control', 'no-store');
-    return res.status(502).json({ error: 'geocoder_unavailable' });
+    return res.status(502).json({ error: 'geocoder_unavailable', status: (e && e.status) || null });
   }
 }
