@@ -8542,7 +8542,7 @@ function _openDemandChips(){
     b.insertAdjacentHTML('afterbegin','<div id="dqCityWrap" style="margin-bottom:14px;">'
       +'<div style="font-size:12px;font-weight:800;color:var(--mid);margin-bottom:4px;">'+(EN?'Which city are you looking in?':'V jakém městě hledáš?')+'</div>'
       +'<input id="dqCityInp" type="text" value="" placeholder="'+(EN?'Start typing the city…':'Začni psát město…')+'" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:inherit;">'
-      +'<div style="font-size:11px;color:var(--light);line-height:1.45;margin-top:4px;">'+(EN?'Type the city, pick it from the list and wait for its parts to load. Pick the one closest to where you live.':'Napiš město, vyber ho z nabídky a počkej, až se načtou jeho části. Vyber tu, která je nejblíž tvému bydlišti.')+'</div>'
+      +'<div style="font-size:11px;color:var(--light);line-height:1.45;margin-top:4px;">'+(EN?'Type the city and pick it from the list. Then add your postal code — we use it to find clubs really close to you.':'Napiš město a vyber ho z nabídky. Pak doplň PSČ — podle něj najdeme kluby opravdu blízko tebe.')+'</div>'
       +(st.final?('<div id="dqCityPicked" style="font-size:12.5px;color:var(--dark);font-weight:700;margin-top:6px;">✅ '+escapeHtml(st.final.precision==='district'?(st.final.city+' · '+st.final.label):(st.final.postal?(st.final.label+' · '+st.final.postal):st.final.label))+'</div>'):'')
       +'</div>');
     var ci=ov.querySelector('#dqCityInp');
@@ -8588,7 +8588,7 @@ function _openDemandChips(){
         c.onclick=function(){
           var on=c.dataset.on==='1';
           // NEJVÝŠ 2 SPORTY. Kdo odklikne všechno, neřekne nic -- klub z toho nepozná, co tu chybí.
-          if(key==='disc' && !on && (st.disc||[]).length>=2){ toast(EN?'\u26a0\ufe0f Pick at most 2 sports':'\u26a0\ufe0f Vyber nejv\u00fd\u0161 2 sporty', 1); return; }
+          if(key==='disc' && !on && (st.disc||[]).length>=2){ toast(EN?'\u26a0\ufe0f Pick at most 2 disciplines':'\u26a0\ufe0f Vyber nejv\u00fd\u0161 2 discipl\u00edny', 1); return; }
           c.dataset.on=on?'':'1';
           c.style.background=on?'#fff':'var(--dark)'; c.style.color=on?'var(--dark)':'#fff'; c.style.borderColor=on?'var(--border)':'var(--dark)';
           if(single && !on){
@@ -51634,11 +51634,19 @@ function _normTxt(t){ try{ return String(t||'').toLowerCase().normalize('NFD').r
 // na město ho rovnou nastaví. Při nastavování vlastní polohy se seznam neukazuje.
 async function _renderBrowseCities(){
   const box=$('cityList'), inp=$('cityInp'); if(!box || !inp) return;
-  if(window._cityMode!=='browse'){ box.style.display='none'; box.innerHTML=''; inp.oninput=null; return; }
+  const _grp=inp.closest('.loc-group'), _ok=$('btnCityOk');
+  if(inp._ph0==null) inp._ph0=inp.placeholder||'';
+  if(window._cityMode!=='browse'){ box.style.display='none'; box.innerHTML=''; inp.oninput=null;
+    if(_grp) _grp.style.display=''; if(_ok) _ok.style.display=''; inp.placeholder=inp._ph0; return; }
   const EN=LANG==='en';
+  // PROHLÍŽENÍ JINDE = VÝBĚR ZE SEZNAMU, ne psaní. Pole zůstane jen jako hledání v dlouhém
+  // seznamu (víc než 8 měst); potvrzovací tlačítko není potřeba -- klepnutí na město ho vybere.
+  if(_ok) _ok.style.display='none';
+  inp.value=''; inp.placeholder=EN?'Search the list\u2026':'Hledat v seznamu\u2026';
   const cc=String(($('cityCountry')&&$('cityCountry').value)||'').toUpperCase();
   box.style.display='block'; box.innerHTML='<div style="padding:10px 12px;font-size:12.5px;color:var(--light);">'+L('Načítám...')+'</div>';
   const all=await _browseCitySource(cc);
+  if(_grp) _grp.style.display=((all||[]).length>8)?'':'none';
   const paint=function(){
     const nv=_normTxt(inp.value||'');
     const rows=(all||[]).filter(function(c){ return !nv || _normTxt(c.label).indexOf(nv)>=0; });
@@ -51672,6 +51680,19 @@ async function _browseCitySource(cc){
     (data||[]).forEach(function(g){ if(!_entHidden('gym', g)) add(g.city, g.city_lat, g.city_lng, 'gyms'); }); }catch(e){}
   try{ const { data }=await supaClient.from('profiles_pub').select('city,city_lat,city_lng,deleted_at,coach_closing_at,coach_paused_at,deactivated_at,account_suspended').eq('coach_status','approved').eq('country_code', cc).not('city_lat','is',null).limit(5000);
     (data||[]).forEach(function(p){ if(!_entHidden('coach', p)) add(p.city, p.city_lat, p.city_lng, 'coaches'); }); }catch(e){}
+  // JEDNO MĚSTO = JEDEN ŘÁDEK. Starší záznamy mají město napsané různě („Praha", „prague",
+  // „Prag") -- skupiny, jejichž středy jsou do 15 km od sebe, se sloučí; název má ta větší
+  // (při shodě ta s velkým písmenem).
+  const _grpL=Object.keys(by).map(function(k){ return by[k]; }).sort(function(a,b){ return (b.n-a.n) || ((/^[A-ZÁ-Ž]/.test(b.label)?1:0)-(/^[A-ZÁ-Ž]/.test(a.label)?1:0)); });
+  const _merged=[];
+  _grpL.forEach(function(o){
+    const la=o.sumLat/o.n, ln=o.sumLng/o.n;
+    const t=_merged.find(function(m){ return haversine(m.sumLat/m.n, m.sumLng/m.n, la, ln)<=15; });
+    if(t){ t.sumLat+=o.sumLat; t.sumLng+=o.sumLng; t.n+=o.n; t.gyms+=o.gyms; t.coaches+=o.coaches; }
+    else _merged.push(Object.assign({}, o));
+  });
+  Object.keys(by).forEach(function(k){ delete by[k]; });
+  _merged.forEach(function(o,i){ if(/^[a-zà-ž]/.test(o.label)) o.label=o.label.charAt(0).toUpperCase()+o.label.slice(1); by['m'+i]=o; });
   const EN=LANG==='en';
   const rows=Object.keys(by).map(function(k){ const o=by[k];
     const pl=function(n, en1, enN, cs1, cs24, cs5){ return n+' '+(EN?(n===1?en1:enN):(n===1?cs1:(n<5?cs24:cs5))); };
@@ -51680,9 +51701,10 @@ async function _browseCitySource(cc){
   window._bcCache[cc]={ at:Date.now(), rows:rows };
   return rows;
 }
-// MĚSTO + JEHO ČÁST (poptávka, vlastní poloha). Našeptávač nabízí jen obce v zemi; po výběru
-// obce se pod polem objeví seznam jejích částí z mapy (/api/geo-districts). onChange dostane
-// vybrané místo: obec (její střed), nebo vybranou část. Kde mapa části nemá, zůstane obec.
+// MĚSTO + PSČ (poptávka, vlastní poloha). Našeptávač nabízí jen obce v zemi; po výběru obce se
+// pod polem objeví pole na PSČ. Bod je pak střed oblasti toho PSČ -- přesný na pár km v každé
+// zemi a bez čekání (dřív seznam městských částí z mapy: pomalý, v půlce světa žádný). PSČ je
+// nepovinné: bez něj zůstane střed obce. onChange dostane vybrané místo.
 function _attachCityDistrict(inp, afterEl, ccGetter, onChange){
   if(!inp) return;
   const EN=LANG==='en';
@@ -51691,58 +51713,40 @@ function _attachCityDistrict(inp, afterEl, ccGetter, onChange){
   if(!box){ box=document.createElement('div'); box.id=inp.id+'Dist'; box.style.cssText='margin:8px 0 4px;display:none;text-align:left;';
     (afterEl||inp).parentNode.insertBefore(box, (afterEl||inp).nextSibling); }
   inp._final=null;
-  const paint=function(city, list){
-    if(!city || !list || !list.length){ box.style.display='none'; box.innerHTML=''; return; }
-    box.style.display='block';
-    box.innerHTML='<div style="font-size:12px;font-weight:800;color:var(--mid);margin-bottom:4px;">'+(EN?'Part of the city \u00b7 ':'\u010c\u00e1st m\u011bsta \u00b7 ')+escapeHtml(city.label)+'</div>'
-      +'<select style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:inherit;background:#fff;color:var(--dark);">'
-      +'<option value="">'+(EN?'Whole city (centre)':'Cel\u00e9 m\u011bsto (st\u0159ed)')+'</option>'
-      +list.map(function(d,i){ return '<option value="'+i+'">'+escapeHtml(d.name)+'</option>'; }).join('')+'</select>';
-    const sel=box.querySelector('select');
-    sel.onchange=function(){ const d=list[parseInt(sel.value,10)];
-      inp._final=d?{ lat:d.lat, lng:d.lng, label:d.name, city:city.label, district:d.name, cc:city.cc, country:city.country, precision:'district' }:city;
-      if(typeof onChange==='function') onChange(inp._final); };
-  };
-  // ZEMĚ BEZ MĚSTSKÝCH ČÁSTÍ (USA): místo seznamu částí PSČ / ZIP. Americká města části nemají
-  // a jejich střed bývá od okraje i 30 km -- s párováním na 20 km by to nesedělo. ZIP je
-  // nepovinný; bez něj zůstane střed města.
-  const _POSTAL_CC=['US'];
+  const hideBox=function(){ box.style.display='none'; box.innerHTML=''; };
+  // Vzor PSČ podle země (jen nápověda v poli).
+  const _PC_EX={ CZ:'602 00', SK:'811 01', PL:'00-001', DE:'10115', AT:'1010', CH:'8001', FR:'75001', IT:'00118', ES:'28001', PT:'1000-001', NL:'1012 AB', BE:'1000', GB:'SW1A 1AA', IE:'D02 X285', US:'90012', CA:'M5V 2T6', AU:'2000', NZ:'1010', BR:'01310-100', MX:'06000', JP:'100-0001', TH:'10110', HU:'1051', RO:'010011', HR:'10000', SI:'1000', SE:'111 22', NO:'0150', DK:'1050', FI:'00100', UA:'01001', LT:'01100', LV:'LV-1050', EE:'10111', GR:'105 57', BG:'1000', RS:'11000' };
   const paintZip=function(city){
+    const cc=String(city.cc||'').toUpperCase(), ex=_PC_EX[cc]||'';
     box.style.display='block';
-    box.innerHTML='<div style="font-size:12px;font-weight:800;color:var(--mid);margin-bottom:4px;">'+(EN?'ZIP code \u00b7 ':'PS\u010c (ZIP) \u00b7 ')+escapeHtml(city.label)+'</div>'
-      +'<input type="text" inputmode="numeric" autocomplete="postal-code" maxlength="10" placeholder="'+(EN?'e.g. 90012':'nap\u0159. 90012')+'" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:inherit;background:#fff;color:var(--dark);">'
-      +'<div class="zipMsg" style="font-size:11.5px;color:var(--light);margin-top:4px;line-height:1.4;">'+(EN?'Optional. The city centre can be 30 km from you \u2014 with your ZIP we find clubs that are really close.':'Nepovinn\u00e9. St\u0159ed m\u011bsta m\u016f\u017ee b\u00fdt i 30 km od tebe \u2014 podle ZIP najdeme kluby opravdu pobl\u00ed\u017e.')+'</div>';
+    box.innerHTML='<div style="font-size:12px;font-weight:800;color:var(--mid);margin-bottom:4px;">'+(EN?'Postal / ZIP code · ':'PSČ · ')+escapeHtml(city.label)+'</div>'
+      +'<input type="text" autocomplete="postal-code" maxlength="12" placeholder="'+(ex?((EN?'e.g. ':'např. ')+ex):'')+'" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:inherit;background:#fff;color:var(--dark);">'
+      +'<div class="zipMsg" style="font-size:11.5px;color:var(--light);margin-top:4px;line-height:1.4;">'+(EN?'Optional. With your postal code we find clubs that are really close to you; without it we use the city centre.':'Nepovinné. Podle PSČ najdeme kluby opravdu blízko tebe; bez něj se počítá se středem města.')+'</div>';
     const zi=box.querySelector('input'), zm=box.querySelector('.zipMsg'); let zt=null, zseq=0;
     zi.oninput=function(){
-      clearTimeout(zt); const v=String(zi.value||'').trim(); zseq++;
+      clearTimeout(zt); const v=String(zi.value||'').trim(); const my=++zseq;
       if(inp._final!==city){ inp._final=city; if(typeof onChange==='function') onChange(city); }
       zm.style.color='var(--light)';
-      if(v.replace(/[^0-9A-Za-z]/g,'').length<5) return;
-      zt=setTimeout(async function(){ const my=++zseq;
+      if(v.replace(/[^0-9A-Za-z]/g,'').length<3) return;
+      zt=setTimeout(async function(){
         try{
-          const r=await fetch('/api/geo-search?kind=postal&cc='+encodeURIComponent(String(city.cc||'').toLowerCase())+'&q='+encodeURIComponent(v));
+          const r=await fetch('/api/geo-search?kind=postal&cc='+encodeURIComponent(cc.toLowerCase())+'&q='+encodeURIComponent(v));
           const d=r.ok?await r.json():[]; if(my!==zseq || inp._place!==city) return;
           const z=Array.isArray(d)&&d[0];
-          if(!z){ zm.textContent=EN?'This ZIP does not exist in this country.':'Takov\u00e9 PS\u010c v t\u00e9hle zemi nen\u00ed.'; zm.style.color='var(--red)'; return; }
+          if(!z){ zm.textContent=EN?'This postal code does not exist in this country.':'Takové PSČ v téhle zemi není.'; zm.style.color='var(--red)'; return; }
           inp._final={ lat:z.lat, lng:z.lng, label:city.label, city:city.label, district:'', postal:z.postal, cc:city.cc, country:city.country, precision:'postcode' };
-          zm.textContent='\u2713 '+z.postal+(z.city?(' \u00b7 '+z.city):'')+(z.state?(', '+z.state):''); zm.style.color='var(--green)';
+          zm.textContent='✓ '+z.postal+(z.city?(' · '+z.city):'')+(z.state?(', '+z.state):''); zm.style.color='var(--green)';
           if(typeof onChange==='function') onChange(inp._final);
-        }catch(e){ if(my===zseq){ zm.textContent=EN?'ZIP lookup is not answering \u2014 the city centre will be used.':'Hled\u00e1n\u00ed PS\u010c neodpov\u00edd\u00e1 \u2014 pou\u017eije se st\u0159ed m\u011bsta.'; } }
-      }, 400);
+        }catch(e){ if(my===zseq){ zm.textContent=EN?'Postal code lookup is not answering — the city centre will be used.':'Hledání PSČ neodpovídá — použije se střed města.'; } }
+      }, 600);
     };
   };
-  inp.addEventListener('input', function(){ if(!inp._place || inp.value.trim()!==inp._place.label){ inp._final=null; paint(null); if(typeof onChange==='function') onChange(null); } });
+  inp.addEventListener('input', function(){ if(!inp._place || inp.value.trim()!==inp._place.label){ inp._final=null; hideBox(); if(typeof onChange==='function') onChange(null); } });
   _attachPlaceSuggest(inp, ccGetter, function(pl){
-    inp._final=pl; if(typeof onChange==='function') onChange(pl); paint(null);
-    if(pl.precision!=='city') return;
-    if(_POSTAL_CC.indexOf(String(pl.cc||'').toUpperCase())>=0){ paintZip(pl); return; }
-    const u='/api/geo-districts?lang='+encodeURIComponent(LANG||'cs')+'&city='+encodeURIComponent(pl.city||pl.label)+'&lat='+pl.lat+'&lon='+pl.lng
-      +(pl.osm_type?('&osm_type='+encodeURIComponent(pl.osm_type)):'')+(pl.osm_id?('&osm_id='+encodeURIComponent(pl.osm_id)):'');
-    // Seznam se pamatuje do zavření appky; server ho drží v databázi, takže čekání je jen poprvé.
-    window._distMem=window._distMem||{};
-    if(window._distMem[u]){ paint(pl, window._distMem[u]); return; }
-    box.style.display='block'; box.innerHTML='<div style="font-size:12px;color:var(--light);">'+(EN?'Loading the parts of the city\u2026':'Na\u010d\u00edt\u00e1m \u010d\u00e1sti m\u011bsta\u2026')+'</div>';
-    fetch(u).then(function(r){ return r.ok?r.json():[]; }).then(function(list){ list=Array.isArray(list)?list:[]; window._distMem[u]=list; if(inp._place!==pl) return; paint(pl, list); }).catch(function(){ if(inp._place===pl) paint(null); });
+    inp._final=pl; if(typeof onChange==='function') onChange(pl); hideBox();
+    // Prohlížení jinde (seznam měst z MTL) PSČ nepotřebuje -- je to jen pohled na jiné město.
+    if(pl.precision!=='city' || inp._noSuggest || typeof inp._localSource==='function') return;
+    paintZip(pl);
   });
 }
 function _attachPlaceSuggest(el, ccGetter, onPick){
