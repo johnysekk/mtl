@@ -41598,6 +41598,113 @@ function _checkoutBack(url){
   if(ps==='already'){ toast(EN?'You already have Exclusive Partner — change the tier on its card.':'Exclusive Partnera už máš — stupeň změň na jeho kartě.', 1); try{ _epReloadMe().then(function(){ openPartnerInfo(); }); }catch(e){} return; }
   location.href=url;
 }
+// NÁKUP NA FIRMU (api/doklad-buyer.js, sql/doklad-buyer.sql). Nad platbou kartou zaškrtávátko;
+// až po zaškrtnutí se objeví země, IČO (u české firmy doplní název, sídlo a DIČ z ARES), název,
+// sídlo a DIČ. Uloží se k téhle platbě a doklad od klubu / kouče pak bude na firmu (Odběratel =
+// firma, pod ní kdo objednal). Stripe se na adresu ani DIČ neptá -- jen tady a jen když jde o firmu.
+// Poslední vyplněnou firmu si prohlížeč pamatuje (jen pro pohodlí, nic se tím neodesílá).
+function _buyerCoBar(box, j){
+  const EN=LANG==='en';
+  const sid=String(j.sessionId||String(j.clientSecret||'').split('_secret_')[0]||''), acct=String(j.stripeAccount||'');
+  if(!/^cs_/.test(sid) || !acct) return;
+  const L=function(cs,en){ return EN?en:cs; };
+  const inp='width:100%;box-sizing:border-box;padding:11px 12px;border:1px solid var(--border,#E0DDD8);border-radius:10px;font-size:15px;font-family:inherit;background:#fff;color:var(--dark,#1a1a1a);';
+  const lab='display:block;font-size:12px;font-weight:700;color:var(--mid,#555);margin:10px 0 4px;';
+  const cc=[['CZ',L('Česko','Czechia')],['SK',L('Slovensko','Slovakia')],['PL',L('Polsko','Poland')],['DE',L('Německo','Germany')],['AT',L('Rakousko','Austria')],['HU',L('Maďarsko','Hungary')],['XX',L('Jiná země','Other country')]];
+  const w=document.createElement('div');
+  w.style.cssText='background:#fff;border:1px solid var(--border,#E0DDD8);border-radius:14px;padding:12px 14px;margin:0 0 12px;';
+  w.innerHTML='<label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:15px;font-weight:800;color:var(--dark,#1a1a1a);">'
+    +'<input type="checkbox" id="_coOn" style="width:20px;height:20px;accent-color:var(--red,#C8102E);margin:0;">🏢 '+L('Nakupuji na firmu','Buying for a company')+'</label>'
+    +'<div style="font-size:12px;color:var(--mid,#555);margin:4px 0 0 30px;line-height:1.45;">'+L('Doklad bude vystavený na firmu (IČO, DIČ, sídlo). Třeba když to platí zaměstnavatel jako benefit.','The receipt will be issued to the company (reg. no., VAT ID, address) — e.g. when your employer pays it as a benefit.')+'</div>'
+    +'<div id="_coF" style="display:none;margin-top:4px;">'
+      +'<label style="'+lab+'">'+L('Země sídla','Country')+'</label><select id="_coCc" style="'+inp+'">'+cc.map(function(c){ return '<option value="'+c[0]+'">'+c[1]+'</option>'; }).join('')+'</select>'
+      +'<div id="_coCcX" style="display:none;"><label style="'+lab+'">'+L('Kód země (2 písmena, např. FR)','Country code (2 letters, e.g. FR)')+'</label><input id="_coCc2" maxlength="2" style="'+inp+'text-transform:uppercase;"></div>'
+      +'<label style="'+lab+'" id="_coIcoL">'+L('IČO','Company reg. no.')+'</label><input id="_coIco" inputmode="numeric" maxlength="20" style="'+inp+'">'
+      +'<div id="_coAres" style="font-size:12px;color:var(--mid,#555);margin-top:4px;min-height:0;"></div>'
+      +'<label style="'+lab+'">'+L('Název firmy','Company name')+'</label><input id="_coName" maxlength="200" style="'+inp+'">'
+      +'<label style="'+lab+'">'+L('Sídlo (ulice, PSČ, město)','Registered address (street, postcode, city)')+'</label><input id="_coAddr" maxlength="300" style="'+inp+'">'
+      +'<label style="'+lab+'">'+L('DIČ (nepovinné)','VAT ID (optional)')+'</label><input id="_coDic" maxlength="20" placeholder="CZ12345678" style="'+inp+'text-transform:uppercase;">'
+      +'<div id="_coVat" style="font-size:12px;color:var(--mid,#555);margin-top:4px;"></div>'
+      +'<button id="_coSave" type="button" style="margin-top:12px;width:100%;padding:12px;border:none;border-radius:11px;background:var(--dark,#1a1a1a);color:#fff;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;">'+L('Uložit údaje firmy','Save company details')+'</button>'
+      +'<div id="_coMsg" style="font-size:12.5px;margin-top:8px;line-height:1.45;color:var(--mid,#555);">'+L('Ulož údaje dřív, než zaplatíš.','Save the details before you pay.')+'</div>'
+    +'</div>';
+  box.appendChild(w);
+  const $=function(id){ return w.querySelector('#'+id); };
+  let saved=false, auto={};
+  const country=function(){ const v=$('_coCc').value; return v==='XX' ? String($('_coCc2').value||'').trim().toUpperCase() : v; };
+  const msg=function(t, ok){ const m=$('_coMsg'); m.textContent=t; m.style.color=ok?'#006040':(ok===false?'#B00020':'var(--mid,#555)'); m.style.fontWeight=ok?'700':'400'; };
+  const dirty=function(){ if(saved){ saved=false; msg(L('Změněno — ulož znovu, než zaplatíš.','Changed — save again before you pay.')); } };
+  const post=async function(body){
+    const r=await fetch('/api/doklad-buyer',{ method:'POST', headers:Object.assign({ 'Content-Type':'application/json' }, (typeof _authHdr==='function' ? (await _authHdr().catch(function(){ return {}; })) : {})), body:JSON.stringify(Object.assign({ sessionId:sid, acct:acct }, body)) });
+    let k={}; try{ k=await r.json(); }catch(e){}
+    if(!r.ok) throw new Error(k.error||('HTTP '+r.status));
+    return k;
+  };
+  const syncCc=function(){
+    const cz=$('_coCc').value==='CZ';
+    $('_coCcX').style.display=$('_coCc').value==='XX'?'block':'none';
+    $('_coIcoL').textContent=cz?L('IČO','Company reg. no. (IČO)'):L('Registrační číslo firmy (nepovinné)','Company reg. no. (optional)');
+    $('_coIco').setAttribute('inputmode', cz?'numeric':'text');
+    $('_coAres').textContent='';
+  };
+  const fill=function(id, v){ const el=$(id); if(!v) return; if(!el.value.trim() || auto[id]===el.value){ el.value=v; auto[id]=v; } };
+  let aresSeq=0;
+  const ares=async function(){
+    if($('_coCc').value!=='CZ') return;
+    const ico=String($('_coIco').value||'').replace(/\s+/g,'');
+    if(!/^\d{8}$/.test(ico)) return;
+    const my=++aresSeq; $('_coAres').textContent=L('Hledám v ARES…','Looking up ARES…');
+    try{
+      const k=await (await fetch('/api/tax-verify?type=ico&id='+encodeURIComponent(ico))).json();
+      if(my!==aresSeq) return;
+      if(k && k.valid){ fill('_coName', k.name); fill('_coAddr', k.address); fill('_coDic', k.dic); $('_coAres').innerHTML='<span style="color:#006040;font-weight:700;">✔ '+escapeHtml(L('Načteno z ARES','Loaded from ARES'))+'</span>'; dirty(); }
+      else if(k && k.ok) $('_coAres').innerHTML='<span style="color:#B00020;">'+escapeHtml(L('IČO v ARES nenalezeno — zkontroluj ho, nebo vyplň údaje ručně.','Reg. no. not found in ARES — check it or fill in the details by hand.'))+'</span>';
+      else $('_coAres').textContent=L('ARES teď neodpovídá — vyplň údaje ručně.','ARES is not responding — fill in the details by hand.');
+    }catch(e){ if(my===aresSeq) $('_coAres').textContent=L('ARES teď neodpovídá — vyplň údaje ručně.','ARES is not responding — fill in the details by hand.'); }
+  };
+  const vies=async function(){
+    const d=String($('_coDic').value||'').replace(/\s+/g,'').toUpperCase(); $('_coVat').textContent='';
+    if(!/^[A-Z]{2}[0-9A-Z+*.]{2,14}$/.test(d)) { if(d) $('_coVat').innerHTML='<span style="color:#B00020;">'+escapeHtml(L('DIČ začíná kódem země, např. CZ12345678.','The VAT ID starts with the country code, e.g. CZ12345678.'))+'</span>'; return; }
+    try{
+      const k=await (await fetch('/api/tax-verify?type=vat&id='+encodeURIComponent(d))).json();
+      if(k && k.ok && k.valid){ fill('_coName', k.name); fill('_coAddr', k.address); $('_coVat').innerHTML='<span style="color:#006040;font-weight:700;">✔ '+escapeHtml(L('DIČ ověřeno ve VIES','VAT ID verified in VIES'))+'</span>'; }
+      else if(k && k.ok) $('_coVat').innerHTML='<span style="color:#B26A00;">'+escapeHtml(L('DIČ ve VIES nenalezeno — na doklad se uvede, jak je napsané.','VAT ID not found in VIES — it will appear on the receipt as typed.'))+'</span>';
+    }catch(e){}
+  };
+  const save=async function(){
+    const b={ company:$('_coName').value.trim(), address:$('_coAddr').value.trim(), ico:$('_coIco').value.trim(), dic:$('_coDic').value.trim(), country:country() };
+    if(!/^[A-Z]{2}$/.test(b.country)){ msg(L('Vyplň kód země (2 písmena).','Fill in the country code (2 letters).'), false); return; }
+    if(b.country==='CZ' && !/^\d{8}$/.test(b.ico.replace(/\s+/g,''))){ msg(L('Vyplň IČO (8 číslic).','Fill in the reg. no. (8 digits).'), false); return; }
+    if(!b.company){ msg(L('Vyplň název firmy.','Fill in the company name.'), false); return; }
+    if(!b.address){ msg(L('Vyplň sídlo firmy.','Fill in the registered address.'), false); return; }
+    const btn=$('_coSave'); btn.disabled=true; btn.textContent='…';
+    try{
+      await post(b); saved=true;
+      msg('✔ '+L('Uloženo — doklad bude na firmu „'+b.company+'“.','Saved — the receipt will be issued to “'+b.company+'”.'), true);
+      try{ localStorage.setItem('mtl_buyer_co', JSON.stringify(b)); }catch(e){}
+    }catch(e){ msg('⚠️ '+L('Neuložilo se: ','Not saved: ')+((e&&e.message)||''), false); }
+    btn.disabled=false; btn.textContent=L('Uložit údaje firmy','Save company details');
+  };
+  $('_coOn').onchange=async function(){
+    $('_coF').style.display=this.checked?'block':'none';
+    if(this.checked){
+      try{ const p=JSON.parse(localStorage.getItem('mtl_buyer_co')||'null'); if(p && !$('_coName').value){
+        const known=cc.some(function(c){ return c[0]===p.country; });
+        $('_coCc').value=known?p.country:'XX'; if(!known) $('_coCc2').value=p.country||''; syncCc();
+        $('_coIco').value=p.ico||''; $('_coName').value=p.company||''; $('_coAddr').value=p.address||''; $('_coDic').value=p.dic||'';
+        msg(L('Vyplněno podle minula — zkontroluj a ulož.','Filled in from last time — check and save.'));
+      } }catch(e){}
+    } else if(saved){
+      saved=false;
+      try{ await post({ clear:true }); msg(L('Ulož údaje dřív, než zaplatíš.','Save the details before you pay.')); toast(L('Doklad bude na tvé jméno.','The receipt will be in your name.')); }catch(e){}
+    }
+  };
+  $('_coCc').onchange=function(){ syncCc(); dirty(); ares(); };
+  $('_coIco').oninput=function(){ dirty(); if(/^\d{8}$/.test(String(this.value||'').replace(/\s+/g,''))) ares(); };
+  ['_coName','_coAddr','_coCc2'].forEach(function(id){ $(id).oninput=dirty; });
+  $('_coDic').oninput=dirty; $('_coDic').onchange=vies;
+  $('_coSave').onclick=save;
+}
 // src = adresa /api/pay?… (GET, doplní se embed=1), nebo funkce (embed) -> JSON odpovědi serveru
 // (POST /api/cohort-pay); odpověď, kterou si funkce obslouží sama (např. „už zapsán“), vrátí
 // { _handled:true }. opt.onClose = zavřel platbu bez zaplacení / nešla spustit (vrátit tlačítko);
@@ -41649,11 +41756,14 @@ async function _stripeEmbed(src, opt){
     const S=await _loadStripeJs();
     if(!ov.isConnected) return;                                   // mezitím zavřeno
     const box=document.getElementById('stripeEmbBox'); box.innerHTML='';
+    // NÁKUP NA FIRMU: jen u plateb klubům a koučům (přímá platba na jejich účet), ne u EP / dodavatele.
+    let mountEl=box;
+    if(j.stripeAccount){ try{ _buyerCoBar(box, j); mountEl=document.createElement('div'); box.appendChild(mountEl); }catch(e){ mountEl=box; } }
     // Přímá platba na účet klubu / kouče: Stripe.js musí běžet pod tím účtem, jinak session nenajde.
     const st=j.stripeAccount ? S(j.publishableKey, { stripeAccount:j.stripeAccount }) : S(j.publishableKey);
     co=await st.initEmbeddedCheckout({ fetchClientSecret: async function(){ return j.clientSecret; } });
     if(!ov.isConnected){ try{ co.destroy(); }catch(e){} return; }
-    co.mount(box);
+    co.mount(mountEl);
   }catch(e){
     // Stripe.js se nenačetl: klasická stránka Stripe. Z adresy /api/pay ji založí server sám,
     // u funkce si ji vyžádáme bez embed.
