@@ -5904,6 +5904,14 @@ const NOTIF_T = {
   demand_hotspot: (d)=> LANG==='en'
     ? `🔥 ${d.people||0} people near ${d.city||'an area'}${d.country?(', '+(_ccName(d.country)||d.country)):''} want ${d.disc?(typeof disciplineLabel==='function'?disciplineLabel(d.disc):d.disc):'a klub'} — hot acquisition target. Tap to open the map.`
     : `🔥 ${d.people||0} lidí u ${d.city||'oblasti'}${d.country?(', '+(_ccName(d.country)||d.country)):''} chce ${d.disc?(typeof disciplineLabel==='function'?disciplineLabel(d.disc):d.disc):'gym'} — horká akviziční příležitost. Klikni pro mapu.`,
+  // V okolí přibyl klub / kouč (api/demand-match-cron.js). Vzdálenost je vzdušnou čarou od místa
+  // z poptávky (poloha telefonu nebo vybraná obec / čtvrť).
+  demand_new_gym: (d)=> LANG==='en'
+    ? `🏛️ A club joined near you: ${d.name||''} · ${d.disc?disciplineLabel(d.disc):''}${d.city?(' · '+d.city):''}. About ${d.km||'?'} km in a straight line from ${d.from?('the place in your request ('+d.from+')'):'the place in your request'}.`
+    : `🏛️ V okolí přibyl klub: ${d.name||''} · ${d.disc?disciplineLabel(d.disc):''}${d.city?(' · '+d.city):''}. Asi ${d.km||'?'} km vzdušnou čarou od ${d.from?('místa z tvé poptávky ('+d.from+')'):'místa z tvé poptávky'}.`,
+  demand_new_coach: (d)=> LANG==='en'
+    ? `🥊 A coach joined near you: ${d.name||''} (in-person lessons) · ${d.disc?disciplineLabel(d.disc):''}${d.city?(' · '+d.city):''}. About ${d.km||'?'} km in a straight line from ${d.from?('the place in your request ('+d.from+')'):'the place in your request'}.`
+    : `🥊 V okolí přibyl kouč: ${d.name||''} (osobní lekce) · ${d.disc?disciplineLabel(d.disc):''}${d.city?(' · '+d.city):''}. Asi ${d.km||'?'} km vzdušnou čarou od ${d.from?('místa z tvé poptávky ('+d.from+')'):'místa z tvé poptávky'}.`,
   demand_priority: (d)=> LANG==='en'
     ? `🙌 Lots of people near ${d.city||'you'} want a klub too — we're prioritising your area and will let you know the moment one joins MTL.`
     : `🙌 U ${d.city||'tebe'} chce klub i spousta dalších lidí — dáváme tvé oblasti přednost a dáme ti vědět, jakmile se nějaký přidá.`,
@@ -8234,14 +8242,20 @@ async function _reportGymDemand(discCsv, silent, commit, form){
     var lng=(_ul&&_ul.lng!=null)?_ul.lng:((currentUser.city_lng!=null)?+currentUser.city_lng:null);
     // MĚSTO Z FORMULÁŘE má přednost před prohlíženou polohou. Když se liší, dohledáme k němu
     // souřadnice -- bez nich se poptávka zahodí. Poloha uživatele se tím NEMĚNÍ.
-    if(form && form.city && form.city.trim() && form.city.trim().toLowerCase()!==city.toLowerCase()){
+    if(form && form.place && form.place.lat!=null && form.place.lng!=null){
+      // VYBRANÉ MÍSTO z nabídky (obec, čtvrť) -- přesný bod a země z něj, nic se nedohledává.
+      city=form.place.label; lat=form.place.lat; lng=form.place.lng; country=form.place.cc||country;
+    } else if(form && form.city && form.city.trim() && form.city.trim().toLowerCase()!==city.toLowerCase()){
       var _fc=form.city.trim();
       try{
-        var _hit=(typeof CITY_COORDS!=='undefined') ? Object.entries(CITY_COORDS).find(function(e){ return e[0].toLowerCase()===_fc.toLowerCase(); }) : null;
+        var _hcc0=String((currentUser&&(currentUser.country_code||currentUser.residence_country))||'').toUpperCase();
+        var _hit=(typeof CITY_COORDS!=='undefined') ? Object.entries(CITY_COORDS).find(function(e){ return e[0].toLowerCase()===_fc.toLowerCase() && (!_hcc0 || e[1].cc===_hcc0); }) : null;
         // Země patří k MĚSTU z formuláře, ne k prohlížené poloze (odtud „Brno, Francie").
         if(_hit){ city=_hit[0]; lat=_hit[1].lat; lng=_hit[1].lng; country=_hit[1].cc||''; }
         else{
-          var _gr=await fetch('/api/geo-search?limit=1&lang='+(LANG==='en'?'en':'cs')+'&q='+encodeURIComponent(_fc));
+          // V ZEMI ÚČTU. Bez omezení „Brno" u francouzského účtu klidně skončilo kdekoli.
+          var _hcc=String((currentUser&&(currentUser.country_code||currentUser.residence_country))||'').toLowerCase();
+          var _gr=await fetch('/api/geo-search?limit=1&kind=place&lang='+(LANG==='en'?'en':'cs')+(_hcc?('&cc='+encodeURIComponent(_hcc)):'')+'&q='+encodeURIComponent(_fc));
           var _gj=await _gr.json();
           if(_gj && _gj.length){ var _ga=_gj[0].address||{}; city=_ga.city||_ga.town||_ga.village||_ga.municipality||_fc; lat=parseFloat(_gj[0].lat); lng=parseFloat(_gj[0].lon); country=String(_ga.country_code||'').toUpperCase(); }
           else { if(!silent) toast(LANG==='en'?('\u26a0\ufe0f City not found: '+_fc):('\u26a0\ufe0f M\u011bsto nenalezeno: '+_fc)); return; }
@@ -8495,7 +8509,13 @@ function _openDemandChips(){
       +'<div style="font-size:11px;color:var(--light);line-height:1.4;margin-top:4px;">'+(EN?'Where you want to train \u2014 not where you happen to be browsing.':'Kde chce\u0161 tr\u00e9novat \u2014 ne kde zrovna prohl\u00ed\u017e\u00ed\u0161.')+'</div>'
       +'</div>');
     var ci=ov.querySelector('#dqCityInp');
-    if(ci) ci.oninput=function(){ st.city=ci.value.trim(); };
+    if(ci){
+      ci.oninput=function(){ st.city=ci.value.trim(); if(st.place && st.place.label!==st.city) st.place=null; };
+      if(st.place) ci._place=st.place;
+      // Výběr obce nebo její části z nabídky = přesný bod. Hledá se v zemi účtu.
+      try{ _attachPlaceSuggest(ci, function(){ return String((currentUser&&(currentUser.country_code||currentUser.residence_country))||''); },
+        function(pl){ st.place=pl; st.city=pl.label; }); }catch(e){}
+    }
   };
   var _dqCityHint=function(){
     var hasLoc=(typeof userLoc!=='undefined' && userLoc && userLoc.lat!=null) || (currentUser && currentUser.city_lat!=null);
@@ -8567,7 +8587,8 @@ function _openDemandChips(){
     if(step<STEPS.length-1){ step++; draw(); return; }
     ov.remove();
     _reportGymDemand(st.disc.join(','), false, st.commit,
-      { windows:st.win.join(','), levels:st.lvl.concat(st.grp).join(','), reasons:st.why.join(','), note:st.note, want:st.want.join(','), city:st.city });
+      { windows:st.win.join(','), levels:st.lvl.concat(st.grp).join(','), reasons:st.why.join(','), note:st.note, want:st.want.join(','), city:st.city,
+        place:(st.place && st.place.label===st.city) ? st.place : null });
   };
   draw();
 }
@@ -19297,15 +19318,18 @@ async function checkGymOwnership(){
     try{
       const g=_myGymData; if(!g || !g.id) return;
       if(g.city_lat!=null && g.city_lng!=null) return;
-      const _q=[g.address, g.city, (typeof _ccName==='function' && g.country_code)?_ccName(g.country_code):g.country].filter(Boolean).join(', ');
-      if(!_q) return;
-      const r=await fetch('/api/geo-search?limit=1&q='+encodeURIComponent(_q));
-      if(!r.ok) return;
-      const d=await r.json();
-      if(!d || !d.length) return;
+      // V ZEMI KLUBU, nejdřív adresa, pak obec; střed státu nikdy (rozbil by vzdálenosti).
+      const _gcc=String(g.country_code||(typeof _ccOf==='function'?_ccOf(g.country||g.billing_country||''):'')||'').toLowerCase();
+      if(!_gcc || !g.city) return;
+      const _gq=function(q, kind){ return fetch('/api/geo-search?limit=1'+(kind?('&kind='+kind):'')+'&cc='+encodeURIComponent(_gcc)+'&q='+encodeURIComponent(q)).then(function(r){ return r.ok?r.json():[]; }); };
+      let d=g.address ? await _gq(g.address+', '+(g.postal_code?g.postal_code+' ':'')+g.city) : [];
+      if(!d || !d.length) d=await _gq((g.postal_code?g.postal_code+' ':'')+g.city, 'place');
+      d=(d||[]).filter(function(x){ return x && x.precision!=='country' && x.precision!=='region'; });
+      if(!d.length) return;
       const lat=parseFloat(d[0].lat), lng=parseFloat(d[0].lon);
       if(!isFinite(lat) || !isFinite(lng)) return;
-      await supaClient.from('gyms').update({ city_lat:lat, city_lng:lng }).eq('id', g.id);
+      let _u=await supaClient.from('gyms').update({ city_lat:lat, city_lng:lng, geo_precision:d[0].precision||null }).eq('id', g.id);
+      if(_u.error) await supaClient.from('gyms').update({ city_lat:lat, city_lng:lng }).eq('id', g.id);
       g.city_lat=lat; g.city_lng=lng;
       console.log('[klub] souřadnice dopočítány', g.id, lat, lng);
     }catch(e){}
@@ -25109,7 +25133,7 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData, { subject:
       if(p.line1 && $('gcAddress')) $('gcAddress').value=p.line1;
       if(p.city && $('gcCity')) $('gcCity').value=p.city;
       if(p.postal && $('gcPostal')) $('gcPostal').value=p.postal;
-      window._gcPickedGeo={ lat:p.lat, lng:p.lng, addr:($('gcAddress')&&$('gcAddress').value)||'' };
+      window._gcPickedGeo={ lat:p.lat, lng:p.lng, addr:($('gcAddress')&&$('gcAddress').value)||'', precision:((p.raw&&p.raw.precision)||'address') };
     }, function(){ return (_myGymData&&(_myGymData.country_code||_myGymData.billing_country))||''; }); }catch(e){}
   if($('gtSearchBtn')) $('gtSearchBtn').onclick=gtSearchCoaches;
   if($('gtLinkBox')) renderInviteLink('team');
@@ -31015,23 +31039,24 @@ async function submitGymChangeRequest(){
     // Souřadnice z našeptávače, když se adresa od výběru nezměnila -- přesnější než dohledávat
     // ji znovu a bez dalšího dotazu na mapu.
     const _pg=window._gcPickedGeo;
-    if(_pg && _pg.addr===next.address && _pg.lat!=null){ patch.city_lat=_pg.lat; patch.city_lng=_pg.lng; }
+    if(_pg && _pg.addr===next.address && _pg.lat!=null){ patch.city_lat=_pg.lat; patch.city_lng=_pg.lng; patch.geo_precision=_pg.precision||'address'; }
     else try{
-      const _q=(next.address? (next.address+', ') : '')+next.city;
-      let _r=await fetch('/api/geo-search?limit=1&q='+encodeURIComponent(_q));
-      let _d=await _r.json();
-      if((!_d||!_d.length) && next.city){
-        _r=await fetch('/api/geo-search?limit=1&q='+encodeURIComponent(next.city));
-        _d=await _r.json();
-      }
-      if(_d && _d.length){ patch.city_lat=parseFloat(_d[0].lat); patch.city_lng=parseFloat(_d[0].lon); }
+      // V ZEMI KLUBU (cc je podmínka), nejdřív přesná adresa, pak obec; střed státu nikdy.
+      const _gcc=String((_myGymData&&(_myGymData.country_code||_myGymData.billing_country))||'').toLowerCase();
+      const _gq=function(q, kind){ return fetch('/api/geo-search?limit=1'+(kind?('&kind='+kind):'')+(_gcc?('&cc='+encodeURIComponent(_gcc)):'')+'&q='+encodeURIComponent(q)).then(function(r){ return r.ok?r.json():[]; }); };
+      const _pc=next.postal?(next.postal+' '):'';
+      let _d=next.address ? await _gq(next.address+', '+_pc+next.city) : [];
+      if((!_d||!_d.length) && next.city) _d=await _gq(_pc+next.city, 'place');
+      _d=(_d||[]).filter(function(x){ return x && x.precision!=='country' && x.precision!=='region'; });
+      if(_d.length){ patch.city_lat=parseFloat(_d[0].lat); patch.city_lng=parseFloat(_d[0].lon); patch.geo_precision=_d[0].precision||null; }
     }catch(e){ console.log('[gymGeo]', e&&e.message); }
   }
   if(next.address!==undefined || next.city!==undefined){ const _ae=await _gymAddrCountryCheck(next.address||'', next.city||'', (_myGymData&&(_myGymData.country_code||_myGymData.billing_country))||''); if(_ae){ toast('\u26a0\ufe0f '+_ae,1); return; } }
   const btn=$('gcSubmit'); if(btn){ btn.disabled=true; btn.textContent=(LANG==='en'?'Saving...':'Ukládám...'); }
   try{
-    const { error } = await supaClient.from('gyms').update(patch).eq('id', _myGymData.id);
-    if(!error){ try{ _myGymData.venue_type=_vtSel; }catch(e){} }
+    let { error } = await supaClient.from('gyms').update(patch).eq('id', _myGymData.id);
+    if(error && /geo_precision/.test(String(error.message||''))){ delete patch.geo_precision; ({ error }=await supaClient.from('gyms').update(patch).eq('id', _myGymData.id)); }
+    if(!error){ try{ _myGymData.venue_type=_vtSel; if(patch.city_lat!=null){ _myGymData.city_lat=patch.city_lat; _myGymData.city_lng=patch.city_lng; } }catch(e){} }
     if(error){ toast('⚠️ '+error.message); if(btn){ btn.disabled=false; btn.textContent=(LANG==='en'?'Save':'Uložit'); } return; }
     _myGymData.name=patch.name; _myGymData.address=patch.address; _myGymData.city=patch.city; _myGymData.capacity=patch.capacity;
     try{ _auditLog(_myGymData.id,'settings_changed',null,{fields:'name/address/city/capacity'}); }catch(e){}
@@ -31807,9 +31832,9 @@ async function _loadFirstClubOffer(gymId, box){
         var _t2=await _freshTok();
         var rr=await fetch('/api/gym-cohort?gymId='+encodeURIComponent(gymId),{ method:'POST',
           headers:{'Content-Type':'application/json','x-access-token':_t2},
-          body:JSON.stringify({ pct:+((document.getElementById('fcPct')||{}).value||0), days:+((document.getElementById('fcDays')||{}).value||30) }) });
+          body:JSON.stringify({ discount_pct:+((document.getElementById('fcPct')||{}).value||0), expires_days:+((document.getElementById('fcDays')||{}).value||30) }) });
         var jj=await rr.json().catch(function(){return {};});
-        if(jj&&jj.ok){ toast((EN?'\u2705 Sent to ':'\u2705 Odesl\u00e1no ')+(jj.sent||0)+(EN?' people':' lidem'),1); closeSheet('shFirstClub'); }
+        if(jj&&jj.ok){ toast((EN?'\u2705 Sent to ':'\u2705 Odesl\u00e1no ')+(jj.notified||jj.sent||0)+(EN?' people':' lidem'),1); closeSheet('shFirstClub'); }
         else { toast('\u26a0\ufe0f '+((jj&&jj.error)||'')); sb.disabled=false; sb.textContent=(EN?('Send to '+n+' people'):('Poslat '+n+' lidem')); }
       }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); sb.disabled=false; }
     };
@@ -32905,7 +32930,12 @@ function openCityInput(mode){
   // po odmítnuté GPS, návrat po změně země) se tvářilo jako prohlížení a do profilu
   // neuložilo nic.
   window._cityMode = (mode === 'browse') ? 'browse' : 'set';
-  $('cityInp').value='';
+  $('cityInp').value=''; $('cityInp')._place=null;
+  // Našeptávač obcí a jejich částí, jen v zemi: při nastavení v domovské, při prohlížení ve vybrané.
+  try{ _attachPlaceSuggest($('cityInp'), function(){
+    if(window._cityMode==='browse') return String(($('cityCountry')&&$('cityCountry').value)||'');
+    return String((currentUser&&(currentUser.country_code||currentUser.residence_country))||($('cityCountry')&&$('cityCountry').value)||'');
+  }); }catch(e){}
   try{ _fillCityCountries(); }catch(e){}
   try{ if(typeof ensureOpenCountries==='function') ensureOpenCountries().then(function(){ try{ _fillCityCountries(); }catch(e){} }); }catch(e){}
   $('cityOv').classList.add('open');
@@ -32933,6 +32963,27 @@ async function confirmCity(){
   }
   const _ccNm=function(c){ try{ return (typeof _ccName==='function' && _ccName(c)) || c; }catch(e){ return c; } };
 
+  // VYBRANÉ MÍSTO z našeptávače (obec, městská část, čtvrť) -- přesný bod, bez dalšího hledání.
+  const _pl=($('cityInp') && $('cityInp')._place && $('cityInp')._place.label===val) ? $('cityInp')._place : null;
+  if(_pl){
+    if(_selCC && _pl.cc && _pl.cc!==_selCC){ toast(EN?(val+' is not in '+_ccNm(_selCC)+'.'):(val+' nen\u00ed v '+_ccNm(_selCC)+'.')); return; }
+    $('cityOv').classList.remove('open');
+    if(_browse){ await _setBrowseLoc({ lat:_pl.lat, lng:_pl.lng, city:_pl.label, country:(_pl.country||_ccNm(_pl.cc||_selCC)), countryCode:(_pl.cc||_selCC||null) }); return; }
+    userLoc={ lat:_pl.lat, lng:_pl.lng, city:_pl.label, country:(_homeCC?_ccNm(_homeCC):(_pl.country||null)), countryCode:(_homeCC||_pl.cc) };
+    if(currentUser){
+      const _f={ city:_pl.label, city_lat:_pl.lat, city_lng:_pl.lng, geo_precision:_pl.precision||'city' };
+      let { error:_pe }=await supaClient.from('profiles').update(_f).eq('id', currentUser.id);
+      if(_pe && /geo_precision/.test(String(_pe.message||''))){ delete _f.geo_precision; ({ error:_pe }=await supaClient.from('profiles').update(_f).eq('id', currentUser.id)); }
+      if(_pe){
+        if(/city_outside_country/.test(String(_pe.message||''))){ toast(EN?'That city is not in your country.':'To m\u011bsto nen\u00ed v tv\u00e9 zemi.'); return; }
+        toast('\u26a0\ufe0f '+(_pe.message||'')); return;
+      }
+      currentUser.city=_pl.label; currentUser.city_lat=_pl.lat; currentUser.city_lng=_pl.lng;
+      try{ if(typeof _syncCountryRow==='function') _syncCountryRow(); }catch(e){}
+    }
+    onLocSet();
+    return;
+  }
   // Předdefinovaná města (rychlá cesta). Platí jen když sedí země.
   const m=Object.entries(CITY_COORDS).find(function(e){
     if(e[0].toLowerCase()!==val.toLowerCase()) return false;
@@ -32965,7 +33016,7 @@ async function confirmCity(){
   try{
     // Hledá se UVNITŘ země přes countrycodes. Země přilepená k dotazu („Paris, Czechia")
     // je pro Nominatim jen nápověda a klidně vrátí Paříž ve Francii.
-    const res=await fetch('/api/geo-search?limit=1'
+    const res=await fetch('/api/geo-search?limit=1&kind=place'
       +(_selCC?('&cc='+encodeURIComponent(_selCC)):'')
       +'&lang='+encodeURIComponent(LANG||'cs')
       +'&q='+encodeURIComponent(val));
@@ -33957,7 +34008,7 @@ async function openGymApp(){
       if(p.line1 && $('gymAddress')) $('gymAddress').value=p.line1;
       if(p.city && $('gymCity')) $('gymCity').value=p.city;
       if(p.postal && $('gymPostal')) $('gymPostal').value=p.postal;
-      window._gaPickedGeo={ lat:p.lat, lng:p.lng, addr:($('gymAddress')&&$('gymAddress').value)||'' };
+      window._gaPickedGeo={ lat:p.lat, lng:p.lng, addr:($('gymAddress')&&$('gymAddress').value)||'', precision:((p.raw&&p.raw.precision)||'address') };
     }, function(){ return ($('gymCountry')&&$('gymCountry').value)||''; }); }catch(e){}
   // Fakturacni adresa nasepavac nemela vubec -- mela ho jen adresa klubu. Sidlo pritom konci
   // na dokladu a jde do DAC7, takze prave tam je volne psana adresa nejdrazsi.
@@ -34200,23 +34251,27 @@ if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
 
   const btn=$('btnSubmitGymApp'); btn.textContent=L('Odesílám...'); btn.disabled=true;
   try {
-    let lat=null,lng=null,countryName=null;
+    let lat=null,lng=null,countryName=null,_gymGeoPrec=null;
     try {
       // PŘESNÁ ADRESA, ne jen město. Geokódovalo se pouze město, takže každý klub v Brně seděl
       // na jednom bodě uprostřed -- vzdálenost ve vyhledávání se pletla klidně o pět kilometrů.
       // Adresa je "kde klub je", ne fakturační sídlo; to je billing_address a na mapu nepatří.
       // Když se adresa nenajde (překlep, nová ulice), spadne se na město jako dřív.
       // Souřadnice z našeptávače, když se adresa od výběru nezměnila -- přesnější a bez dotazu.
+      // VŽDY V ZEMI KLUBU (cc je podmínka). Dřív se hledalo bez země a výsledek z našeptávače
+      // se hned přepsal dalším dotazem -- „Paris" pak klidně skončilo v Texasu. Vybraná adresa
+      // z nabídky má přednost a nic se nedohledává; bez ní nejdřív přesná adresa, pak obec.
+      // Střed státu se nikdy neuloží.
       const _pg=window._gaPickedGeo;
-      if(_pg && _pg.addr===address && _pg.lat!=null){ lat=_pg.lat; lng=_pg.lng; }
-      const _q1 = (address && String(address).trim()) ? (String(address).trim()+', '+city) : city;
-      let geo=await fetch(`/api/geo-search?limit=1&q=${encodeURIComponent(_q1)}`);
-      let gd=await geo.json();
-      if((!gd || !gd.length) && _q1!==city){
-        geo=await fetch(`/api/geo-search?limit=1&q=${encodeURIComponent(city)}`);
-        gd=await geo.json();
+      const _gcc=String(($('gymCountry')&&$('gymCountry').value)||'').toLowerCase();
+      if(_pg && _pg.addr===address && _pg.lat!=null){ lat=_pg.lat; lng=_pg.lng; _gymGeoPrec=_pg.precision||'address'; }
+      else {
+        const _gq=function(q, kind){ return fetch('/api/geo-search?limit=1'+(kind?('&kind='+kind):'')+(_gcc?('&cc='+encodeURIComponent(_gcc)):'')+'&q='+encodeURIComponent(q)).then(function(r){ return r.ok?r.json():[]; }); };
+        let gd=(address && String(address).trim()) ? await _gq(String(address).trim()+', '+(postal?postal+' ':'')+city) : [];
+        if(!gd || !gd.length) gd=await _gq((postal?postal+' ':'')+city, 'place');
+        const _ok=(gd||[]).filter(function(x){ return x && x.precision!=='country' && x.precision!=='region'; });
+        if(_ok.length){ lat=parseFloat(_ok[0].lat); lng=parseFloat(_ok[0].lon); _gymGeoPrec=_ok[0].precision||null; countryName=_ok[0].address&&_ok[0].address.country||null; }
       }
-      if(gd && gd.length){ lat=parseFloat(gd[0].lat); lng=parseFloat(gd[0].lon); countryName=gd[0].address&&gd[0].address.country||null; }
     } catch(e){}
     const showcasePhotos = GYM_SHOWCASE.filter(sp=>gymShowcaseUrls[sp.k]).map(sp=>({ space:sp.k, url:gymShowcaseUrls[sp.k] }));
     // Zázemí a vybavení se v přihlášce už nesbírá -- sloupce zůstávají kvůli klubům,
@@ -34251,7 +34306,7 @@ if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
     { const _gcc=(($('gymCountry')&&$('gymCountry').value)||'CZ'); const _te=_taxIdErr(_gcc, ($('gymTaxId')&&$('gymTaxId').value)||''); if(_te){ toast('\u26a0\ufe0f '+_te); try{ $('gymTaxId').focus(); }catch(e){} return; } }
     const _gymPayload = {
       terms_accepted_at: new Date().toISOString(),
-      owner_id: currentUser.id, referred_by: _gymRefBy, referred_at: _gymRefBy?new Date().toISOString():null, name, city, country: countryName, city_lat:lat, city_lng:lng,
+      owner_id: currentUser.id, referred_by: _gymRefBy, referred_at: _gymRefBy?new Date().toISOString():null, name, city, country: countryName, city_lat:lat, city_lng:lng, geo_precision:_gymGeoPrec,
       address: address || null, postal_code: postal || null, description: fullDesc || null,
       photos: JSON.stringify(showcasePhotos),
 
@@ -34335,7 +34390,7 @@ if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
     // vidím Přidat klub". Při takové chybě se nepovinná pole odeberou a zkusí se to znovu.
     let _gymIns = { data: newGym, error };
     if(_gymIns.error && /column|schema cache|does not exist/i.test(String(_gymIns.error.message||''))){
-      const _opt=['founder_id','legal_entity','org_form','ads_opt_in','ads_opt_in_at'];
+      const _opt=['founder_id','legal_entity','org_form','ads_opt_in','ads_opt_in_at','geo_precision'];
       const _retry=Object.assign({}, _gymPayload);
       _opt.forEach(function(k){ delete _retry[k]; });
       console.warn('[klub] insert bez nepovinných sloupců:', _gymIns.error.message);
@@ -35620,7 +35675,7 @@ async function loadNotifications(append){
     const isCoachRefAdmin = false; /* referral EP grants removed — rewards are Shikai/Bankai */
     // beta_pending sem musí být přidané, jinak se notifikace vykreslí jako neklikatelná a obsluha
   // se vůbec nenapojí -- větev, která má otevřít admin, pak nemá kdo spustit.
-  const clickable = k==='provider_closing' || k==='provider_restored' || k==='provider_closed' || k==='entity_deleted' || k==='entity_closing_admin' || k==='mtl_terminated' || k==='dsa_illegal_notice' || k==='account_blocked' || k==='xp_adjusted' || k==='xp_restored' || k==='dsa_received' || k==='dsa_decided' || k==='dsa_report_new' || k==='dsa_restored' || k==='dsa_restricted' || k==='pass_transfer_offer' || k==='pass_transfer_done' || k==='pass_transfer_decided' || k==='pairing_link' || k==='owner_xfer_request' || k==='owner_xfer_done' || k==='sup_paidfor' || k==='owner_xfer_declined' || k==='owner_xfer_cancelled' || k==='memb_mode_needed' || k==='dac7_data_needed' || k==='dac7_overdue' || k==='admin_suspended' || k==='admin_restored' || k==='event_cohost_invite' || k==='event_cohost_accepted' || k==='event_cohost_declined' || k==='event_cohost_left' || k==='event_cohost_removed' || k==='oss_threshold' || k==='commission_upcoming' || k==='family_payreq_offer' || k==='ref_joined' || k==='coach_ref_qualified' || k==='minor_course_req' || k==='migration_request' || k==='withdrawal_done' || k==='online_withdrawal' || k==='online_plan_new' || k==='online_piece_done' || k==='online_plan_qr' || k==='online_plan_active' || k==='withdrawal_request' || k==='minor_member_app' || k==='minor_waiver' || k==='family_request' || k==='autonomy_sunset' || k==='dropin_bank_cancelled' || k==='bug_report' || k==='milestone' || k==='address_from_club' || k==='address_request' || k==='class_cancelled' || k==='trial_booked' || k==='pis_creditor_outage' || (String(k||'').indexOf('kid_share')===0) || k==='kidxfer' || k==='kidxfer_done' || k==='kidxfer_reversed' || k==='support_ticket' || k==='class_reminder' || k==='fav_added_coach' || k==='fav_added_gym' || isCoachLessonRem || isStudResched || k==='coach_pay_ok' || k==='coach_qr_intent' || k==='qr_unconfirmed' || k==='event_qr_intent' || k==='walkin_drop' || k==='org_linked' || k==='org_accepted' || k==='org_fee' || k==='org_invite' || k==='org_fee_paid' || k==='org_join' || k==='org_fee_in' || k==='org_join_req' || k==='org_removed' || k==='org_left' || k==='org_expiring' || k==='beta_pending' || k==='came_of_age' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || k==='resched_conf' || k==='cancel_conf' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked' || k==='commission_no_card' || k==='commission_suspended' || k==='new_provider' || k==='supplier_live' || k==='supplier_ended';
+  const clickable = k==='provider_closing' || k==='provider_restored' || k==='provider_closed' || k==='entity_deleted' || k==='entity_closing_admin' || k==='mtl_terminated' || k==='dsa_illegal_notice' || k==='demand_new_gym' || k==='demand_new_coach' || k==='welcome_offer' || k==='account_blocked' || k==='xp_adjusted' || k==='xp_restored' || k==='dsa_received' || k==='dsa_decided' || k==='dsa_report_new' || k==='dsa_restored' || k==='dsa_restricted' || k==='pass_transfer_offer' || k==='pass_transfer_done' || k==='pass_transfer_decided' || k==='pairing_link' || k==='owner_xfer_request' || k==='owner_xfer_done' || k==='sup_paidfor' || k==='owner_xfer_declined' || k==='owner_xfer_cancelled' || k==='memb_mode_needed' || k==='dac7_data_needed' || k==='dac7_overdue' || k==='admin_suspended' || k==='admin_restored' || k==='event_cohost_invite' || k==='event_cohost_accepted' || k==='event_cohost_declined' || k==='event_cohost_left' || k==='event_cohost_removed' || k==='oss_threshold' || k==='commission_upcoming' || k==='family_payreq_offer' || k==='ref_joined' || k==='coach_ref_qualified' || k==='minor_course_req' || k==='migration_request' || k==='withdrawal_done' || k==='online_withdrawal' || k==='online_plan_new' || k==='online_piece_done' || k==='online_plan_qr' || k==='online_plan_active' || k==='withdrawal_request' || k==='minor_member_app' || k==='minor_waiver' || k==='family_request' || k==='autonomy_sunset' || k==='dropin_bank_cancelled' || k==='bug_report' || k==='milestone' || k==='address_from_club' || k==='address_request' || k==='class_cancelled' || k==='trial_booked' || k==='pis_creditor_outage' || (String(k||'').indexOf('kid_share')===0) || k==='kidxfer' || k==='kidxfer_done' || k==='kidxfer_reversed' || k==='support_ticket' || k==='class_reminder' || k==='fav_added_coach' || k==='fav_added_gym' || isCoachLessonRem || isStudResched || k==='coach_pay_ok' || k==='coach_qr_intent' || k==='qr_unconfirmed' || k==='event_qr_intent' || k==='walkin_drop' || k==='org_linked' || k==='org_accepted' || k==='org_fee' || k==='org_invite' || k==='org_fee_paid' || k==='org_join' || k==='org_fee_in' || k==='org_join_req' || k==='org_removed' || k==='org_left' || k==='org_expiring' || k==='beta_pending' || k==='came_of_age' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || k==='resched_conf' || k==='cancel_conf' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked' || k==='commission_no_card' || k==='commission_suspended' || k==='new_provider' || k==='supplier_live' || k==='supplier_ended';
     // Data notifikace i pro štítky odkazu (class_cancelled, coach_qr_intent, qr_unconfirmed...).
     // Dřív tu _pd nebylo -- žilo jen v obsluze kliknutí níž -- a štítek padal na ReferenceError.
     var _pd={}; try{ _pd=JSON.parse(n.data||'{}')||{}; }catch(e){ _pd={}; }
@@ -35635,6 +35690,8 @@ async function loadNotifications(append){
       else if(k==='entity_deleted') linkLabel = (LANG==='en'?'Payments overview ›':'Přehled plateb ›');
       else if(k==='entity_closing_admin') linkLabel = (LANG==='en'?'Open in Admin ›':'Otevřít v Adminu ›');
       else if(k==='mtl_terminated' || k==='dsa_illegal_notice') linkLabel = (LANG==='en'?'Details ›':'Podrobnosti ›');
+      else if(k==='demand_new_gym' || k==='welcome_offer') linkLabel = (LANG==='en'?'Open the club ›':'Otevřít klub ›');
+      else if(k==='demand_new_coach') linkLabel = (LANG==='en'?'Open the coach ›':'Otevřít kouče ›');
       else if(k==='xp_adjusted' || k==='xp_restored') linkLabel = (LANG==='en'?'My XP ›':'Moje XP ›');
       else if(k==='owner_xfer_request') linkLabel = LANG==='en'?'View and decide ›':'Zobrazit a rozhodnout ›';
       else if(k==='owner_xfer_declined' || k==='owner_xfer_cancelled') linkLabel = LANG==='en'?'Details ›':'Podrobnosti ›';
@@ -36209,6 +36266,7 @@ async function loadNotifications(append){
         else if(k==='account_blocked'){ try{ const _d=JSON.parse(n.data||'{}'); closeSheet('shNotif'); _showAccountBlocked(_d); }catch(e){} }
         else if(k==='provider_closing' || k==='provider_restored' || k==='provider_closed'){ try{ closeSheet('shNotif'); }catch(e){} try{ openSheet('shBookings'); if(typeof loadBookings==='function') loadBookings('upcoming'); }catch(e){} }
         else if(k==='entity_deleted'){ try{ closeSheet('shNotif'); }catch(e){} try{ const _d=JSON.parse(n.data||'{}'); if(typeof _openFinance==='function') _openFinance(_d.entity_kind==='coach'?'coach':'club'); else openSheet('shDanger'); }catch(e){} }
+        else if(k==='demand_new_gym' || k==='welcome_offer' || k==='demand_new_coach'){ let _d={}; try{ _d=(typeof n.data==='string'?JSON.parse(n.data||'{}'):n.data)||{}; }catch(e){} try{ closeSheet('shNotif'); }catch(e){} try{ if(k==='demand_new_coach'){ if(_d.coach_id) openProfileById(_d.coach_id); } else if(_d.gym_id) _openClubById(_d.gym_id); }catch(e){} }
         else if(k==='mtl_terminated' || k==='dsa_illegal_notice'){ let _d={}; try{ _d=(typeof n.data==='string'?JSON.parse(n.data||'{}'):n.data)||{}; }catch(e){} try{ closeSheet('shNotif'); }catch(e){} _showMtlNotice(k, _d); }
         else if(k==='entity_closing_admin'){ let _d={}; try{ _d=(typeof n.data==='string'?JSON.parse(n.data||'{}'):n.data)||{}; }catch(e){} try{ closeSheet('shNotif'); }catch(e){} try{ if(typeof openAdminUsers==='function') openAdminUsers({ userId:_d.user_id||null }); }catch(e){} }
         else if(k==='xp_adjusted' || k==='xp_restored'){ try{ closeSheet('shNotif'); }catch(e){} try{ if(typeof openLevel==='function') openLevel(); }catch(e){} }
@@ -51531,6 +51589,67 @@ function _billAddrFromFields(prefix){
 }
 // ccGetter (volitelné): vrátí kód země. Pak se hledá V CELÉ TÉ ZEMI (fakturační adresa může
 // být jinde než klub, klidně v zahraničí -- třeba v jiném státě USA), město jen zpřesňuje.
+// ═══ VÝBĚR MÍSTA (obec, městská část, čtvrť) ═══════════════════════════════════════════
+// Pro výběr města a místa v poptávce. Hledá jen uvnitř země (ccGetter -- podmínka, ne
+// nápověda) a jen obce a jejich části (kind=place), takže „Praha 1" nebo „Brno-střed" je
+// konkrétní bod, ne střed celého města. Po výběru nese pole el._place:
+//   { lat, lng, label, city, district, cc, precision }
+// Kdo jen napíše a nevybere, el._place nemá -- volající pak dohledá první výsledek sám.
+// Poskytovatele map určuje server (api/_geo-provider.js).
+function _placeLabel(x){
+  const a=(x&&x.address)||{};
+  const city=a.city||a.town||a.village||a.municipality||'';
+  const part=a.city_district||a.suburb||a.borough||a.quarter||a.neighbourhood||'';
+  const region=a.state||a.county||'';
+  const head=(x&&x.precision==='district'&&part)?part:(city||part||String((x&&x.display_name)||'').split(',')[0]);
+  const sub=[(head!==city?city:''), region].filter(Boolean).filter(function(v,i,arr){ return arr.indexOf(v)===i && v!==head; }).join(', ');
+  return { head:head, sub:sub, city:city||head, district:(part&&part!==city)?part:'' };
+}
+function _placeFromResult(x){
+  const a=(x&&x.address)||{}, L=_placeLabel(x);
+  return { lat:parseFloat(x.lat), lng:parseFloat(x.lon), label:L.head, city:L.city, district:L.district,
+    cc:String(a.country_code||'').toUpperCase()||null, country:a.country||null, precision:x.precision||'city' };
+}
+function _attachPlaceSuggest(el, ccGetter, onPick){
+  if(!el || el._placeWired) return; el._placeWired=true;
+  el.setAttribute('autocomplete','off');
+  const box=document.createElement('div');
+  box.style.cssText='position:fixed;z-index:100120;background:#fff;border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);max-height:240px;overflow:auto;display:none;font-family:\'DM Sans\',sans-serif;';
+  document.body.appendChild(box);
+  const place=function(){ try{ const r=el.getBoundingClientRect(); box.style.left=r.left+'px'; box.style.top=(r.bottom+4)+'px'; box.style.width=r.width+'px'; }catch(e){} };
+  const hide=function(){ box.style.display='none'; };
+  let _t=null, _last='', _seq=0;
+  const search=async function(){
+    const v=String(el.value||'').trim();
+    if(v.length<2 || v===_last){ if(v.length<2) hide(); return; }
+    _last=v; const my=++_seq;
+    const cc=String((typeof ccGetter==='function'?(ccGetter()||''):'')).toLowerCase().replace(/[^a-z]/g,'').slice(0,2);
+    try{
+      const r=await fetch('/api/geo-search?kind=place&limit=8&lang='+encodeURIComponent(LANG||'cs')+(cc?('&cc='+cc):'')+'&q='+encodeURIComponent(v.length<3?(v+' '):v));
+      if(my!==_seq) return;
+      const d=r.ok?await r.json():null;
+      if(!d || !d.length){
+        box.innerHTML='<div style="padding:10px 12px;font-size:12.5px;color:var(--mid);line-height:1.45;">'+(r.ok?(LANG==='en'?'Nothing found in this country — check the spelling.':'V téhle zemi nic takového není — zkontroluj název.'):(LANG==='en'?'Place search is not answering right now — try again in a moment.':'Hledání míst teď neodpovídá — zkus to za chvíli.'))+'</div>';
+        box.style.display='block'; place(); return; }
+      const seen={}; const rows=d.filter(function(x){ const L=_placeLabel(x); const k=(L.head+'|'+L.sub).toLowerCase(); if(seen[k]) return false; seen[k]=1; return true; }).slice(0,6);
+      box.innerHTML=rows.map(function(x,i){ const L=_placeLabel(x);
+        return '<div class="plItem" data-i="'+i+'" style="padding:10px 12px;cursor:pointer;border-bottom:1px solid var(--border);line-height:1.35;"><div style="font-size:14px;font-weight:700;color:var(--dark);">'+escapeHtml(L.head)+'</div>'
+          +(L.sub?('<div style="font-size:11.5px;color:var(--mid);">'+escapeHtml(L.sub)+'</div>'):'')+'</div>'; }).join('');
+      place(); box.style.display='block';
+      box.querySelectorAll('.plItem').forEach(function(it){
+        const pick=function(ev){ if(ev&&ev.preventDefault) ev.preventDefault();
+          const x=rows[Number(it.dataset.i)]; if(!x) return;
+          const pl=_placeFromResult(x);
+          el.value=pl.label; el._place=pl; _last=pl.label; hide();
+          if(typeof onPick==='function') onPick(pl); };
+        it.addEventListener('mousedown', pick); it.addEventListener('touchstart', pick, { passive:false });
+      });
+    }catch(e){ hide(); }
+  };
+  el.addEventListener('input', function(){ if(el._place && el.value.trim()!==el._place.label) el._place=null; clearTimeout(_t); _t=setTimeout(search, 350); });
+  el.addEventListener('blur', function(){ setTimeout(hide, 180); });
+  window.addEventListener('scroll', place, true); window.addEventListener('resize', place);
+}
 function _attachAddrSuggest(inputId, cityGetter, onPick, ccGetter){
   const el=document.getElementById(inputId); if(!el || el._addrWired) return;
   el._addrWired=true;
@@ -57987,6 +58106,9 @@ async function showPaidPopup(){
   // k rozhodnutí, ?go=xferdone&k=&id=&s= -> po převodu (nový majitel rovnou ke kartě na provizi).
   // Návrat z banky po připojení účtu k párování plateb (Nastavení plateb).
   if(params.get('pairlink')){ const _pl=params.get('pairlink'); try{ const _u=new URL(location.href); _u.searchParams.delete('pairlink'); _u.searchParams.delete('clientId'); history.replaceState(null,'',_u.pathname+(_u.search||'')+_u.hash); }catch(e){} setTimeout(function(){ _pairLinkReturn(_pl); }, 800); }
+  // Proklik z e-mailu „V okolí přibyl klub / kouč" (api/demand-match-cron.js).
+  if(params.get('go')==='gym' && params.get('id')){ const _gid=params.get('id'); setTimeout(function(){ try{ _openClubById(_gid); }catch(e){} }, 1400); }
+  if(params.get('go')==='coach' && params.get('id')){ const _cid=params.get('id'); setTimeout(function(){ try{ openProfileById(_cid); }catch(e){} }, 1400); }
   if(params.get('go')==='closing'){ setTimeout(function(){ try{ if(currentUser) openSheet('shDanger'); }catch(e){} }, 1400); }
   if(params.get('go')==='blocked'){ setTimeout(function(){ try{ if(currentUser) _showAccountBlocked({}); }catch(e){} }, 1200); }
   if(params.get('go')==='paidfor'){ setTimeout(function(){ try{ if(currentUser) openPaidFor(); }catch(e){} }, 1200); }
