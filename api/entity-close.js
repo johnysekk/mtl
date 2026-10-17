@@ -3,7 +3,8 @@
 //   { action:'state' }                                  -> stav mých profilů (proužky v appce)
 //   { action:'preview', kind, id }                       -> co platí až po datu výmazu, předplatná, překážky
 //   { action:'close',   kind, id, mode, reason_key, reason, consent_text }
-//   { action:'restore', kind, id }                       -> zrušit žádost o výmaz (do data výmazu)
+//   { action:'restore', kind, id, consent_text }         -> zrušit žádost o výmaz (do data výmazu); souhlas
+//                                                          s následky se zapíše, potvrzení přijde e-mailem
 //   { action:'pause' | 'unpause', kind, id }             -> pozastavit / zrušit pozastavení
 // kind: 'account' | 'coach' | 'gym' | 'org'   mode: 'refund' | 'fulfil'
 //
@@ -114,7 +115,7 @@ async function closeOne(ent, me, mode, deleteAt, reasonKey, reason, consent, cas
   return { items, stopped: stopped.length, notified: Object.keys(by).length };
 }
 
-async function restoreOne(ent, me, cascadeOnly) {
+async function restoreOne(ent, me, cascadeOnly, consent) {
   if (!ent.closingAt) return { skipped: true };
   const last = await one(`entity_close_log?kind=eq.${ent.kind}&entity_id=eq.${q(ent.id)}&action=eq.close&order=created_at.desc&limit=1&select=meta`);
   if (cascadeOnly && !(last && last.meta && last.meta.cascade)) return { skipped: true };
@@ -138,8 +139,9 @@ async function restoreOne(ent, me, cascadeOnly) {
         { kind: 'provider_restored', go: 'bookings', entity_kind: ent.kind, entity_id: ent.id });
     }
   }
-  await log({ kind: ent.kind, entity_id: String(ent.id), user_id: me, action: 'restore' });
-  return { restored: true };
+  await log({ kind: ent.kind, entity_id: String(ent.id), user_id: me, action: 'restore', consent_text: consent || null,
+    meta: { resumed_subs: subs.length, cascade: !!cascadeOnly, at: new Date().toISOString() } });
+  return { restored: true, name: ent.name, kind: ent.kind, resumed: subs.length };
 }
 
 async function mailOwner(me, title, html) {
@@ -208,7 +210,7 @@ export default async function handler(req, res) {
       // E-mail poskytovateli: datum, co se stane a jak to zrušit.
       try {
         const bankL = (pv.items || []).filter((i) => i.method === 'bank');
-        const html = para(`Požádal(a) jsi o výmaz: <b>${esc(KIND_CS[kind])}${kind !== 'account' ? ' „' + esc(ent.name) + '"' : ''}</b>. Už teď je ${kind === 'account' ? 'skrytý všem' : 'profil skrytý ve vyhledávání'} a nic nového se na něm neprodá. <b>Vymaže se ${esc(dOn)}</b>.`)
+        const html = para(`Požádal(a) jsi o výmaz: <b>${esc(KIND_CS[kind])}${kind !== 'account' ? ' „' + esc(ent.name) + '"' : ''}</b>. Už teď je skrytý všem a nic nového se na něm neprodá. <b>Vymaže se ${esc(dOn)}</b>.`)
           + para('Do té doby to jde kdykoli zrušit jedním klikem v appce (proužek nahoře). Zaplacené rezervace v těchto 30 dnech normálně dojedou — odučit, odbavit, případně zrušit s vrácením peněz.')
           + para(m === 'refund'
             ? `Co platí až po datu výmazu, se ${esc(dOn)} vrátí zákazníkům (100 % nevyčerpané části): kartou automaticky z tvého Stripe účtu${bankL.length ? ', převody a hotovost vrátíš sám — seznam ti přijde v den výmazu' : ''}.`
@@ -228,10 +230,27 @@ export default async function handler(req, res) {
         if (accRow && accRow.deleted_at) return res.status(409).json({ error: 'Maže se celý účet — nejdřív obnov účet (obnoví se s ním i jeho profily).' });
       }
       if (Date.now() > new Date(ent.closingAt).getTime() + CLOSE_DAYS * DAY) return res.status(410).json({ error: 'Lhůta na obnovení uplynula.' });
-      await restoreOne(ent, me, false);
+      const consent = String(b.consent_text || '').trim().slice(0, 4000);
+      if (!consent) return res.status(400).json({ error: 'Chybí souhlas s obnovením.' });
+      const done = [await restoreOne(ent, me, false, consent)];
       if (kind === 'account') {
-        for (const x of await ownedEntities(me)) { const e = await loadEntity(x.kind, x.id); if (e) await restoreOne(e, me, true); }
+        for (const x of await ownedEntities(me)) { const e = await loadEntity(x.kind, x.id); if (e) done.push(await restoreOne(e, me, true, consent)); }
       }
+      // Potvrzení e-mailem: na čí žádost, kdy, co se obnovilo a s čím souhlasil.
+      try {
+        const at = new Date(); const atCz = at.toLocaleString('cs-CZ', { timeZone: 'Europe/Prague', day: 'numeric', month: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+        const rows = done.filter((d) => d && d.restored);
+        const resumed = rows.reduce((a, d) => a + (d.resumed || 0), 0);
+        const html = para(`Na tvou žádost ze dne ${esc(dCz(at))} jsme zrušili výmaz: <b>${esc(KIND_CS[kind])}${kind !== 'account' ? ' „' + esc(ent.name) + '"' : ''}</b>. Nic se mazat nebude.`)
+          + (rows.length > 1 ? para('Obnoveno spolu s účtem: ' + rows.filter((d) => d.kind !== 'account').map((d) => esc(KIND_CS[d.kind] + ' „' + d.name + '"')).join(', ') + '.') : '')
+          + para('Profil je zase vidět ve vyhledávání i zákazníkům a znovu se na něm prodává. Volba vrátit / plnit mimo aplikaci se ruší — nic se vracet nebude.')
+          + (resumed ? para(`Automatické obnovy, které výmaz vypnul, jsou zase zapnuté (${resumed}×) — zákazníkům se v den obnovy znovu strhne platba.`) : '')
+          + para('Dotčení zákazníci dostali notifikaci, že profil v MTL zůstává. Znovu platí VOP a provize MTL jako dřív.')
+          + '<div style="font-size:12px;color:#777;line-height:1.5;background:#F6F3EE;border-radius:10px;padding:10px 12px;margin:0 0 14px;"><b>Tvůj souhlas</b> (' + esc(atCz) + '):<br>' + esc(consent) + '</div>'
+          + para('Pokud jsi o obnovení nežádal(a), hned napiš na Podporu v appce.')
+          + button(APP_URL + '/', 'Otevřít appku');
+        await mailOwner(me, `Výmaz zrušen — ${kind === 'account' ? 'účet' : ent.name}`, html);
+      } catch (e) {}
       try {
         const fid = await founderId(); const who = await one(`profiles?id=eq.${q(me)}&select=name`);
         if (fid && String(fid) !== String(me)) await notify(fid, `✅ ${who && who.name || 'Uživatel'} zrušil výmaz: ${KIND_CS[kind]}${kind !== 'account' ? ' „' + ent.name + '"' : ''}.`,
