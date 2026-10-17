@@ -8279,7 +8279,8 @@ async function _reportGymDemand(discCsv, silent, commit, form){
     // souřadnice -- bez nich se poptávka zahodí. Poloha uživatele se tím NEMĚNÍ.
     if(form && form.place && form.place.lat!=null && form.place.lng!=null){
       // VYBRANÉ MÍSTO z nabídky (obec, čtvrť) -- přesný bod a země z něj, nic se nedohledává.
-      city=form.place.label; lat=form.place.lat; lng=form.place.lng; country=form.place.cc||country;
+      // Město se ukládá jako obec (podle ní se poptávka seskupuje), bod je přesný -- obec nebo její část.
+      city=(form.place.precision==='district' && form.place.city)?form.place.city:form.place.label; lat=form.place.lat; lng=form.place.lng; country=form.place.cc||country;
     } else if(form && form.city && form.city.trim() && form.city.trim().toLowerCase()!==city.toLowerCase()){
       var _fc=form.city.trim();
       try{
@@ -8374,7 +8375,9 @@ function _openDemandChips(){
     // by jinak poslal poptávku za Znojmo a klub by ji dostal na špatné místo.
     // Při dočasném prohlížení jinde předvyplň DOMOVSKÉ město: poptávka se sbírá tam, kde
     // člověk bydlí, ne kam se zrovna kouká. Přepsat si ho samozřejmě může.
-    city:((window._homeLoc && window._homeLoc.city) || (typeof userLoc!=='undefined' && userLoc && userLoc.city) || (currentUser && currentUser.city) || '') };
+    // NEPŘEDVYPLŇUJE SE: místo se vybírá z nabídky (obec, pak její část), jinak by se našeptávač
+    // vůbec nespustil a poptávka by dostala jen střed města z profilu.
+    city:'', place:null, final:null };
   st._city0=st.city;
   var step=0;
 
@@ -8400,7 +8403,7 @@ function _openDemandChips(){
   var STEPS=[
     { key:'disc', cls:'dqDisc', req:true,
       t:(EN?'What are you looking for?':'Co hled\u00e1\u0161?'),
-      h:(EN?'Pick every sport/art you would train.':'Vyber v\u0161echny sporty/um\u011bn\u00ed, kter\u00e9 bys tr\u00e9noval/a.'),
+      h:(EN?'Pick up to 2 sports/arts you want to train most.':'Vyber nejv\u00fd\u0161 2 sporty/um\u011bn\u00ed, kter\u00e9 chce\u0161 tr\u00e9novat nejv\u00edc.'),
       // Sporty a umění zvlášť, každé pod svým nadpisem (jen když jsou zapnuté obojí).
       html:function(){
         var cats=['combat','traditional'].filter(function(c){ return ds.some(function(d){ return discCat(d.v)===c; }); });
@@ -8536,43 +8539,20 @@ function _openDemandChips(){
   var _dqCityRow=function(){
     if(step!==0) return;
     var b=ov.querySelector('#dqBody'); if(!b) return;
-    b.insertAdjacentHTML('afterbegin','<div style="margin-bottom:14px;">'
-      +'<div style="font-size:12px;font-weight:800;color:var(--mid);margin-bottom:4px;">'+(EN?'Which city are you looking in?':'V jak\u00e9m m\u011bst\u011b hled\u00e1\u0161?')+'</div>'
-      +'<input id="dqCityInp" type="text" value="'+String(st.city||'').replace(/"/g,'&quot;')+'" placeholder="'+(EN?'e.g. Plze\u0148':'nap\u0159. Plze\u0148')+'" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:inherit;">'
-      +'<div style="font-size:11px;color:var(--light);line-height:1.4;margin-top:4px;">'+(EN?'Where you want to train \u2014 not where you happen to be browsing.':'Kde chce\u0161 tr\u00e9novat \u2014 ne kde zrovna prohl\u00ed\u017e\u00ed\u0161.')+'</div>'
+    b.insertAdjacentHTML('afterbegin','<div id="dqCityWrap" style="margin-bottom:14px;">'
+      +'<div style="font-size:12px;font-weight:800;color:var(--mid);margin-bottom:4px;">'+(EN?'Which city are you looking in?':'V jakém městě hledáš?')+'</div>'
+      +'<input id="dqCityInp" type="text" value="" placeholder="'+(EN?'Start typing the city…':'Začni psát město…')+'" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:inherit;">'
+      +'<div style="font-size:11px;color:var(--light);line-height:1.45;margin-top:4px;">'+(EN?'Type the city, pick it from the list and wait for its parts to load. Pick the one closest to where you live.':'Napiš město, vyber ho z nabídky a počkej, až se načtou jeho části. Vyber tu, která je nejblíž tvému bydlišti.')+'</div>'
+      +(st.final?('<div id="dqCityPicked" style="font-size:12.5px;color:var(--dark);font-weight:700;margin-top:6px;">✅ '+escapeHtml(st.final.precision==='district'?(st.final.city+' · '+st.final.label):st.final.label)+'</div>'):'')
       +'</div>');
     var ci=ov.querySelector('#dqCityInp');
-    // ČÁST OBCE: po výběru obce se nabídnou její části z mapy (/api/geo-districts) -- bod pak
-    // není střed celého města, ale vybraná část. Nepovinné; bez výběru platí střed obce.
-    var dw=document.createElement('div'); dw.id='dqDistWrap'; dw.style.cssText='margin:-6px 0 14px;display:none;';
-    if(ci && ci.parentNode) ci.parentNode.parentNode.insertBefore(dw, ci.parentNode.nextSibling);
-    var paintDist=function(){
-      var list=st._dists||[];
-      if(!st.place || st.place.precision!=='city' || !list.length){ dw.style.display='none'; dw.innerHTML=''; return; }
-      dw.style.display='block';
-      dw.innerHTML='<div style="font-size:12px;font-weight:800;color:var(--mid);margin-bottom:4px;">'+(EN?'Which part of ':'Kter\u00e1 \u010d\u00e1st ')+escapeHtml(st.place.label)+'?</div>'
-        +'<select id="dqDist" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:inherit;background:#fff;">'
-        +'<option value="">'+(EN?'Whole city (centre)':'Cel\u00e9 m\u011bsto (st\u0159ed)')+'</option>'
-        +list.map(function(d,i){ return '<option value="'+i+'"'+(st.district&&st.district.label===d.name?' selected':'')+'>'+escapeHtml(d.name)+'</option>'; }).join('')+'</select>';
-      var sel=dw.querySelector('#dqDist');
-      sel.onchange=function(){ var d=list[parseInt(sel.value,10)];
-        st.district=d?{ lat:d.lat, lng:d.lng, label:d.name, city:st.place.label, district:d.name, cc:st.place.cc, country:st.place.country, precision:'district' }:null; };
-    };
-    var loadDist=function(pl){
-      st._dists=[]; st.district=null; paintDist();
-      if(!pl || pl.precision!=='city') return;
-      var u='/api/geo-districts?lang='+encodeURIComponent(LANG||'cs')+'&city='+encodeURIComponent(pl.label)+'&lat='+pl.lat+'&lon='+pl.lng
-        +(pl.osm_type?('&osm_type='+encodeURIComponent(pl.osm_type)):'')+(pl.osm_id?('&osm_id='+encodeURIComponent(pl.osm_id)):'');
-      fetch(u).then(function(r){ return r.ok?r.json():[]; }).then(function(list){ if(st.place!==pl) return; st._dists=Array.isArray(list)?list:[]; paintDist(); }).catch(function(){});
-    };
-    if(ci){
-      ci.oninput=function(){ st.city=ci.value.trim(); if(st.place && st.place.label!==st.city){ st.place=null; st.district=null; st._dists=[]; paintDist(); } };
-      if(st.place) ci._place=st.place;
-      // Výběr obce nebo její části z nabídky = přesný bod. Hledá se v zemi účtu.
-      try{ _attachPlaceSuggest(ci, function(){ return String((currentUser&&(currentUser.country_code||currentUser.residence_country))||''); },
-        function(pl){ st.place=pl; st.city=pl.label; loadDist(pl); }); }catch(e){}
-      paintDist();
-    }
+    if(!ci) return;
+    if(st.final && st.place){ ci.value=st.place.label; ci._place=st.place; }
+    // Jen obce v zemi účtu (profil: country_code, jinak země bydliště); po výběru se načtou její části.
+    try{ _attachCityDistrict(ci, ci, function(){ return String((currentUser&&(currentUser.country_code||currentUser.residence_country))||''); },
+      function(pl){ st.final=pl||null; st.place=ci._place||null; st.city=(ci.value||'').trim();
+        var pk=ov.querySelector('#dqCityPicked'); if(pk) pk.remove(); }); }catch(e){}
+    if(st.final) ci._final=st.final;
   };
   var _dqCityHint=function(){
     var hasLoc=(typeof userLoc!=='undefined' && userLoc && userLoc.lat!=null) || (currentUser && currentUser.city_lat!=null);
@@ -8606,7 +8586,10 @@ function _openDemandChips(){
       Array.prototype.forEach.call(ov.querySelectorAll('.'+cls), function(c){
         if((st[key]||[]).indexOf(c.dataset.v)>=0){ c.dataset.on='1'; c.style.background='var(--dark)'; c.style.color='#fff'; c.style.borderColor='var(--dark)'; }
         c.onclick=function(){
-          var on=c.dataset.on==='1'; c.dataset.on=on?'':'1';
+          var on=c.dataset.on==='1';
+          // NEJVÝŠ 2 SPORTY. Kdo odklikne všechno, neřekne nic -- klub z toho nepozná, co tu chybí.
+          if(key==='disc' && !on && (st.disc||[]).length>=2){ toast(EN?'\u26a0\ufe0f Pick at most 2 sports':'\u26a0\ufe0f Vyber nejv\u00fd\u0161 2 sporty', 1); return; }
+          c.dataset.on=on?'':'1';
           c.style.background=on?'#fff':'var(--dark)'; c.style.color=on?'var(--dark)':'#fff'; c.style.borderColor=on?'var(--border)':'var(--dark)';
           if(single && !on){
             Array.prototype.forEach.call(ov.querySelectorAll('.'+cls), function(o){
@@ -8640,8 +8623,8 @@ function _openDemandChips(){
     if(sp.key==='why'){ var n=ov.querySelector('#dqNote'); if(n) st.note=n.value.trim(); }
     if(sp.key==='done'){ var c=ov.querySelector('#dqCommit'); st.commit=!!(c&&c.checked); }
     // Jiné místo než předvyplněné jen VÝBĚREM z nabídky -- napsaný text nemá přesný bod.
-    if(step===0 && ov.querySelector('#dqCityInp') && st.city && st.city!==st._city0 && !(st.place && st.place.label===st.city)){
-      toast(EN?'\u26a0\ufe0f Pick the place from the list (city or its district)':'\u26a0\ufe0f Vyber m\u00edsto z nab\u00eddky (obec nebo jej\u00ed \u010d\u00e1st)', 1);
+    if(step===0 && ov.querySelector('#dqCityInp') && !st.final){
+      toast(EN?'\u26a0\ufe0f Pick the city from the list':'\u26a0\ufe0f Vyber m\u011bsto z nab\u00eddky', 1);
       try{ ov.querySelector('#dqCityInp').focus(); }catch(e){} return;
     }
     if(sp.req && !(st[sp.key]&&st[sp.key].length)) return;
@@ -8650,7 +8633,7 @@ function _openDemandChips(){
     ov.remove();
     _reportGymDemand(st.disc.join(','), false, st.commit,
       { windows:st.win.join(','), levels:st.lvl.concat(st.grp).join(','), reasons:st.why.join(','), note:st.note, want:st.want.join(','), city:st.city,
-        place:(st.place && st.place.label===st.city) ? (st.district || st.place) : null });
+        place:st.final||null });
   };
   draw();
 }
@@ -33000,11 +32983,14 @@ function openCityInput(mode){
   // Vlastní poloha: našeptávač jakéhokoli místa v zemi.
   $('cityInp')._localSource = null;
   $('cityInp')._noSuggest = (window._cityMode==='browse');
-  // Našeptávač obcí a jejich částí, jen v zemi: při nastavení v domovské, při prohlížení ve vybrané.
-  try{ _attachPlaceSuggest($('cityInp'), function(){
-    if(window._cityMode==='browse') return String(($('cityCountry')&&$('cityCountry').value)||'');
-    return String((currentUser&&(currentUser.country_code||currentUser.residence_country))||($('cityCountry')&&$('cityCountry').value)||'');
-  }); }catch(e){}
+  // Vlastní poloha: obec z nabídky (jen v zemi profilu -- country_code, jinak země bydliště),
+  // pak její část ze seznamu. Při prohlížení jinde je místo toho seznam měst s kluby a kouči.
+  try{ const _ci=$('cityInp'); _ci._final=null;
+    if(!_ci._cdWired){ _ci._cdWired=true; _attachCityDistrict(_ci, _ci.closest('.loc-group'), function(){
+      return String((currentUser&&(currentUser.country_code||currentUser.residence_country))||($('cityCountry')&&$('cityCountry').value)||'');
+    }); }
+    const _db=document.getElementById('cityInpDist'); if(_db){ _db.style.display='none'; _db.innerHTML=''; }
+  }catch(e){}
   try{ _fillCityCountries(); }catch(e){}
   try{ _renderBrowseCities(); }catch(e){}
   try{ if(typeof ensureOpenCountries==='function') ensureOpenCountries().then(function(){ try{ _fillCityCountries(); _renderBrowseCities(); }catch(e){} }); }catch(e){}
@@ -33034,7 +33020,10 @@ async function confirmCity(){
   const _ccNm=function(c){ try{ return (typeof _ccName==='function' && _ccName(c)) || c; }catch(e){ return c; } };
 
   // VYBRANÉ MÍSTO z našeptávače (obec, městská část, čtvrť) -- přesný bod, bez dalšího hledání.
-  const _pl=($('cityInp') && $('cityInp')._place && $('cityInp')._place.label===val) ? $('cityInp')._place : null;
+  const _ci0=$('cityInp');
+  const _pl=(_ci0 && _ci0._place && _ci0._place.label===val) ? (_ci0._final||_ci0._place) : null;
+  // Vybraná část města: bod je ta část, jako město se ukládá obec (zobrazení, seskupení).
+  if(_pl && _pl.precision==='district' && _pl.city) _pl.label=_pl.city;
   if(_pl){
     if(_selCC && _pl.cc && _pl.cc!==_selCC){ toast(EN?(val+' is not in '+_ccNm(_selCC)+'.'):(val+' nen\u00ed v '+_ccNm(_selCC)+'.')); return; }
     $('cityOv').classList.remove('open');
@@ -51718,6 +51707,39 @@ async function _browseCitySource(cc){
   window._bcCache[cc]={ at:Date.now(), rows:rows };
   return rows;
 }
+// MĚSTO + JEHO ČÁST (poptávka, vlastní poloha). Našeptávač nabízí jen obce v zemi; po výběru
+// obce se pod polem objeví seznam jejích částí z mapy (/api/geo-districts). onChange dostane
+// vybrané místo: obec (její střed), nebo vybranou část. Kde mapa části nemá, zůstane obec.
+function _attachCityDistrict(inp, afterEl, ccGetter, onChange){
+  if(!inp) return;
+  const EN=LANG==='en';
+  inp._kind='city';
+  let box=document.getElementById(inp.id+'Dist');
+  if(!box){ box=document.createElement('div'); box.id=inp.id+'Dist'; box.style.cssText='margin:8px 0 4px;display:none;text-align:left;';
+    (afterEl||inp).parentNode.insertBefore(box, (afterEl||inp).nextSibling); }
+  inp._final=null;
+  const paint=function(city, list){
+    if(!city || !list || !list.length){ box.style.display='none'; box.innerHTML=''; return; }
+    box.style.display='block';
+    box.innerHTML='<div style="font-size:12px;font-weight:800;color:var(--mid);margin-bottom:4px;">'+(EN?'Part of the city \u00b7 ':'\u010c\u00e1st m\u011bsta \u00b7 ')+escapeHtml(city.label)+'</div>'
+      +'<select style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:inherit;background:#fff;color:var(--dark);">'
+      +'<option value="">'+(EN?'Whole city (centre)':'Cel\u00e9 m\u011bsto (st\u0159ed)')+'</option>'
+      +list.map(function(d,i){ return '<option value="'+i+'">'+escapeHtml(d.name)+'</option>'; }).join('')+'</select>';
+    const sel=box.querySelector('select');
+    sel.onchange=function(){ const d=list[parseInt(sel.value,10)];
+      inp._final=d?{ lat:d.lat, lng:d.lng, label:d.name, city:city.label, district:d.name, cc:city.cc, country:city.country, precision:'district' }:city;
+      if(typeof onChange==='function') onChange(inp._final); };
+  };
+  inp.addEventListener('input', function(){ if(!inp._place || inp.value.trim()!==inp._place.label){ inp._final=null; paint(null); if(typeof onChange==='function') onChange(null); } });
+  _attachPlaceSuggest(inp, ccGetter, function(pl){
+    inp._final=pl; if(typeof onChange==='function') onChange(pl); paint(null);
+    if(pl.precision!=='city') return;
+    box.style.display='block'; box.innerHTML='<div style="font-size:12px;color:var(--light);">'+(EN?'Loading the parts of the city\u2026':'Na\u010d\u00edt\u00e1m \u010d\u00e1sti m\u011bsta\u2026')+'</div>';
+    const u='/api/geo-districts?lang='+encodeURIComponent(LANG||'cs')+'&city='+encodeURIComponent(pl.label)+'&lat='+pl.lat+'&lon='+pl.lng
+      +(pl.osm_type?('&osm_type='+encodeURIComponent(pl.osm_type)):'')+(pl.osm_id?('&osm_id='+encodeURIComponent(pl.osm_id)):'');
+    fetch(u).then(function(r){ return r.ok?r.json():[]; }).then(function(list){ if(inp._place!==pl) return; paint(pl, Array.isArray(list)?list:[]); }).catch(function(){ paint(null); });
+  });
+}
 function _attachPlaceSuggest(el, ccGetter, onPick){
   if(!el || el._placeWired) return; el._placeWired=true;
   el.setAttribute('autocomplete','off');
@@ -51755,7 +51777,7 @@ function _attachPlaceSuggest(el, ccGetter, onPick){
     try{
       // Blízkost: místa u člověka mají přednost (jeho poloha / město z profilu).
       const _nl=(typeof userLoc!=='undefined' && userLoc && userLoc.lat!=null) ? userLoc : ((currentUser && currentUser.city_lat!=null) ? { lat:currentUser.city_lat, lng:currentUser.city_lng } : null);
-      const r=await fetch('/api/geo-search?kind=place&limit=8&lang='+encodeURIComponent(LANG||'cs')+(cc?('&cc='+cc):'')+(_nl?('&lat='+encodeURIComponent(_nl.lat)+'&lon='+encodeURIComponent(_nl.lng)):'')+'&q='+encodeURIComponent(v));
+      const r=await fetch('/api/geo-search?kind='+(el._kind||'place')+'&limit=8&lang='+encodeURIComponent(LANG||'cs')+(cc?('&cc='+cc):'')+(_nl?('&lat='+encodeURIComponent(_nl.lat)+'&lon='+encodeURIComponent(_nl.lng)):'')+'&q='+encodeURIComponent(v));
       if(my!==_seq) return;
       const d=r.ok?await r.json():null;
       if(!d || !d.length){
@@ -52259,7 +52281,7 @@ document.querySelectorAll('.auth-role').forEach(btn=>{
 // Přepínač login/registrace
 function _dobTexts(){ const en=LANG==='en'; if($('authDobTitle')) $('authDobTitle').textContent=en?"When's your birthday?":'Kdy ses narodil/a?'; if($('authDobSub')) $('authDobSub').textContent=en?'Used only to verify age — never shown publicly.':'Slouží jen k ověření věku — veřejně se nezobrazuje.'; if($('authDobBtn')) $('authDobBtn').textContent=en?'Continue':'Pokračovat'; if($('authDobBack')) $('authDobBack').textContent=en?'← Have an account? Log in':'← Máš účet? Přihlas se'; const _dd=$('authDobD'), _mm=$('authDobM'), _yy=$('authDobY'); if(_dd&&_mm&&_yy){ const phD=en?'Day':'Den', phM=en?'Month':'Měsíc', phY=en?'Year':'Rok'; const mns=en?['January','February','March','April','May','June','July','August','September','October','November','December']:['Leden','Únor','Březen','Duben','Květen','Červen','Červenec','Srpen','Září','Říjen','Listopad','Prosinec']; const cy=new Date().getFullYear(); const kd=_dd.value, km=_mm.value, ky=_yy.value; let dop='<option value="">'+phD+'</option>'; for(let i=1;i<=31;i++) dop+='<option value="'+i+'">'+i+'</option>'; _dd.innerHTML=dop; _mm.innerHTML='<option value="">'+phM+'</option>'+mns.map((m,i)=>'<option value="'+(i+1)+'">'+m+'</option>').join(''); let yop='<option value="">'+phY+'</option>'; for(let y=cy;y>=cy-100;y--) yop+='<option value="'+y+'">'+y+'</option>'; _yy.innerHTML=yop; if(kd)_dd.value=kd; if(km)_mm.value=km; if(ky)_yy.value=ky; } }
 function _verTexts(){ const en=LANG==='en'; if($('authVerTitle')) $('authVerTitle').textContent=en?'Almost there!':'Skoro hotovo!'; if($('authVerSub')) $('authVerSub').textContent=(en?'Enter the 6-digit code from your e-mail (sent to ':'Opiš 6místný kód z e-mailu (poslali jsme ho na ')+(_suEmail||'')+')'; if($('authVerBtn')) $('authVerBtn').textContent=en?'Finish sign-up':'Dokončit registraci'; if($('authVerBack')) $('authVerBack').textContent=en?'Have an account? Log in':'Máš účet? Přihlas se'; }
-function _nmTexts(){ const en=LANG==='en'; if($('authNmTitle')) $('authNmTitle').textContent=en?'Your full name':'Celé jméno'; if($('authNmSub')) $('authNmSub').textContent=en?'First and last name — shown on your profile and to coaches.':'Jméno a příjmení — zobrazí se na tvém profilu a koučům.'; if($('authNmBtn')) $('authNmBtn').textContent=en?'Continue':'Pokračovat'; if($('authNmInput')) $('authNmInput').placeholder=en?'Name':'Jméno'; }
+function _nmTexts(){ const en=LANG==='en'; if($('authNmTitle')) $('authNmTitle').textContent=en?'Your full name':'Celé jméno'; if($('authNmSub')) $('authNmSub').textContent=en?'Enter your full first and last name — shown on your profile and to coaches. It cannot be changed freely after registration.':'Zadej své celé jméno a příjmení — zobrazí se na tvém profilu a koučům. Po registraci už nepůjde libovolně měnit.'; if($('authNmBtn')) $('authNmBtn').textContent=en?'Continue':'Pokračovat'; if($('authNmInput')) $('authNmInput').placeholder=en?'Name':'Jméno'; }
 function _authToLogin(){ try{ authMode='login'; if($('authName')) $('authName').style.display='none'; if($('authPass2')){ $('authPass2').style.display='none'; $('authPass2').value=''; } if($('authInvite')) $('authInvite').style.display='none'; var rs=$('roleSelect'); if(rs) rs.style.display='none'; if($('authConsent')) $('authConsent').style.display='none'; _dobOk=false; _regStep='form'; if($('authError')) $('authError').style.display='none'; if(typeof updateAuthTexts==='function') updateAuthTexts(); applyDobGate(); }catch(e){} }
 async function _lockDobAndNext(){
   if(_suUserId){
@@ -52350,7 +52372,7 @@ function applyDobGate(){ const dob=$('authDob'), ff=$('authFormFields'), vf=$('a
 if($('authDobBtn')) $('authDobBtn').onclick=async()=>{ const d=($('authDobD')&&$('authDobD').value)||'', mo=($('authDobM')&&$('authDobM').value)||'', y=($('authDobY')&&$('authDobY').value)||''; const msg=$('authDobMsg'); const EN=LANG==='en'; const show=(t)=>{ if(msg){ msg.style.display='block'; msg.textContent=t; } }; if(!d||!mo||!y){ show(EN?'Select your date of birth.':'Vyber datum narození.'); return; } const dn=+d, mn=+mo, yn=+y; const bd=new Date(yn, mn-1, dn); if(bd.getFullYear()!==yn||bd.getMonth()!==mn-1||bd.getDate()!==dn){ show(EN?'Invalid date.':'Neplatné datum.'); return; } const now=new Date(); let age=now.getFullYear()-yn; const md=now.getMonth()-(mn-1); if(md<0||(md===0&&now.getDate()<dn)) age--; const _ca=_consentAge(_signupCountry); if(age<_ca){ show(EN?('You need to be at least '+_ca+' to have your own account here. Younger members train through their klub — ask a parent or coach to add you.'):('Pro vlastní účet ti tu musí být aspoň '+_ca+' let. Mladší trénují přes svůj klub — řekni rodiči nebo trenérovi, ať tě přidá jako člena.')); return; } if(age<18){ _signupMinor=true; _signupGuardian=null; } else { _signupMinor=false; _signupGuardian=null; } _signupDob=yn+'-'+String(mn).padStart(2,'0')+'-'+String(dn).padStart(2,'0'); _dobOk=true; if(msg) msg.style.display='none'; await _lockDobAndNext(); };
 function _nmTexts(){ const en=LANG==='en';
   if($('authNmTitle')) $('authNmTitle').textContent=en?'What is your name?':'Jak se jmenuje\u0161?';
-  if($('authNmSub')) $('authNmSub').textContent=en?'Full name \u2014 shown on your profile and to coaches.':'Jm\u00e9no a p\u0159\u00edjmen\u00ed \u2014 zobraz\u00ed se na tv\u00e9m profilu a kou\u010d\u016fm.';
+  if($('authNmSub')) $('authNmSub').textContent=en?'Enter your full first and last name \u2014 shown on your profile and to coaches. It cannot be changed freely after registration.':'Zadej sv\u00e9 cel\u00e9 jm\u00e9no a p\u0159\u00edjmen\u00ed \u2014 zobraz\u00ed se na tv\u00e9m profilu a kou\u010d\u016fm. Po registraci u\u017e nep\u016fjde libovoln\u011b m\u011bnit.';
   if($('authNmBtn')) $('authNmBtn').textContent=en?'Finish':'Dokon\u010dit';
   if($('authNmInput')) $('authNmInput').placeholder=en?'Full name':'Cel\u00e9 jm\u00e9no';
 }
