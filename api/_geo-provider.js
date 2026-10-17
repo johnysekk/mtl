@@ -34,6 +34,9 @@ async function nomThrottle() {
   _lastNom = Date.now();
 }
 
+// Prázdné parametry pryč (hlavně jazyk: bez něj vrací služby místní názvy).
+const clean = (p) => { for (const k of [...p.keys()]) if (p.get(k) === '') p.delete(k); return p; };
+
 const DISTRICT = ['suburb', 'city_district', 'district', 'borough', 'quarter', 'neighbourhood', 'neighborhood'];
 const CITY = ['city', 'town', 'village', 'hamlet', 'municipality'];
 
@@ -66,7 +69,7 @@ async function osmSearch(q, o, base, key) {
   if (o.kind === 'place') p.set('featureType', 'settlement');
   if (key) p.set('key', key);
   if (!key) await nomThrottle();
-  const r = await fetch(`${base}/search?${p}`, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
+  const r = await fetch(`${base}/search?${clean(p)}`, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
   if (!r.ok) { const e = new Error('geocoder_unavailable'); e.status = r.status; throw e; }
   const d = await r.json();
   return (Array.isArray(d) ? d : []).map((x) => ({
@@ -79,7 +82,7 @@ async function osmReverse(lat, lon, o, base, key) {
   const p = new URLSearchParams({ format: 'json', addressdetails: '1', zoom: String(o.zoom), 'accept-language': o.lang, lat: String(lat), lon: String(lon) });
   if (key) p.set('key', key);
   if (!key) await nomThrottle();
-  const r = await fetch(`${base}/reverse?${p}`, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
+  const r = await fetch(`${base}/reverse?${clean(p)}`, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
   if (!r.ok) { const e = new Error('geocoder_unavailable'); e.status = r.status; throw e; }
   const d = await r.json();
   return { display_name: d && d.display_name, address: (d && d.address) || {}, lat, lon, precision: nomPrecision(d || {}) };
@@ -96,10 +99,10 @@ const PH_PREC = { city: 'city', district: 'district', locality: 'district', coun
 async function photonPlaces(q, o) {
   const p = new URLSearchParams({ q, limit: String(Math.min(20, o.limit * 3)) });
   ['city', 'district', 'locality'].forEach((l) => p.append('layer', l));
-  if (['en', 'de', 'fr', 'it'].includes(o.lang)) p.set('lang', o.lang);
+  if (['en', 'de', 'fr', 'it'].includes(o.lang)) p.set('lang', o.lang);   // prázdné = místní názvy
   // Bez filtru země u Photonu: přednost dostanou místa blízko člověka, cizí země se vyřadí níž.
   if (o.near) { p.set('lat', String(o.near.lat)); p.set('lon', String(o.near.lng)); }
-  const r = await fetch(`https://photon.komoot.io/api/?${p}`, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
+  const r = await fetch(`https://photon.komoot.io/api/?${clean(p)}`, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
   if (!r.ok) { const e = new Error('geocoder_unavailable'); e.status = r.status; throw e; }
   const d = await r.json();
   return ((d && d.features) || []).map((f) => {
@@ -119,7 +122,7 @@ async function liqAutocomplete(q, o) {
   const p = new URLSearchParams({ key: process.env.LOCATIONIQ_KEY, q, limit: String(Math.min(20, o.limit)), 'accept-language': o.lang, dedupe: '1',
     tag: 'place:city,place:town,place:village,place:hamlet,place:suburb,place:quarter,place:neighbourhood,place:borough' });
   if (o.cc) p.set('countrycodes', o.cc);
-  const r = await fetch(`https://api.locationiq.com/v1/autocomplete?${p}`, { headers: { Accept: 'application/json' } });
+  const r = await fetch(`https://api.locationiq.com/v1/autocomplete?${clean(p)}`, { headers: { Accept: 'application/json' } });
   if (!r.ok) { const e = new Error('geocoder_unavailable'); e.status = r.status; throw e; }
   const d = await r.json();
   return (Array.isArray(d) ? d : []).map((x) => {
@@ -158,7 +161,7 @@ async function mbSearch(q, o) {
   if (o.cc) p.set('country', o.cc);
   if (o.kind === 'place') p.set('types', 'place,locality,neighborhood,postcode');
   if (process.env.MAPBOX_PERMANENT === '1') p.set('permanent', 'true');
-  const r = await fetch(`https://api.mapbox.com/search/geocode/v6/forward?${p}`);
+  const r = await fetch(`https://api.mapbox.com/search/geocode/v6/forward?${clean(p)}`);
   if (!r.ok) { const e = new Error('geocoder_unavailable'); e.status = r.status; throw e; }
   const d = await r.json();
   return ((d && d.features) || []).map(mbToNom);
@@ -167,7 +170,7 @@ async function mbReverse(lat, lon, o) {
   const p = new URLSearchParams({ longitude: String(lon), latitude: String(lat), access_token: process.env.MAPBOX_TOKEN, language: o.lang, limit: '1' });
   if (o.zoom <= 6) p.set('types', 'country,region'); else if (o.zoom <= 12) p.set('types', 'place,locality,neighborhood');
   if (process.env.MAPBOX_PERMANENT === '1') p.set('permanent', 'true');
-  const r = await fetch(`https://api.mapbox.com/search/geocode/v6/reverse?${p}`);
+  const r = await fetch(`https://api.mapbox.com/search/geocode/v6/reverse?${clean(p)}`);
   if (!r.ok) { const e = new Error('geocoder_unavailable'); e.status = r.status; throw e; }
   const d = await r.json();
   const f = ((d && d.features) || [])[0];
@@ -201,7 +204,7 @@ function gToNom(g) {
 async function gSearch(q, o) {
   const p = new URLSearchParams({ address: q, key: process.env.GOOGLE_GEO_KEY, language: o.lang });
   if (o.cc) p.set('components', o.cc.split(',').map((c) => 'country:' + c.toUpperCase()).join('|'));
-  const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?${p}`);
+  const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?${clean(p)}`);
   if (!r.ok) { const e = new Error('geocoder_unavailable'); e.status = r.status; throw e; }
   const d = await r.json();
   if (d.status && !['OK', 'ZERO_RESULTS'].includes(d.status)) { const e = new Error('geocoder_unavailable'); e.status = 502; throw e; }
@@ -210,7 +213,7 @@ async function gSearch(q, o) {
 async function gReverse(lat, lon, o) {
   const p = new URLSearchParams({ latlng: `${lat},${lon}`, key: process.env.GOOGLE_GEO_KEY, language: o.lang });
   if (o.zoom <= 6) p.set('result_type', 'country'); else if (o.zoom <= 12) p.set('result_type', 'locality|sublocality');
-  const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?${p}`);
+  const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?${clean(p)}`);
   if (!r.ok) { const e = new Error('geocoder_unavailable'); e.status = r.status; throw e; }
   const d = await r.json();
   const g = ((d && d.results) || [])[0];
@@ -222,7 +225,9 @@ async function gReverse(lat, lon, o) {
 // ── Veřejné funkce ────────────────────────────────────────────────────────────────────
 // o: { cc:'cz' | 'cz,sk', lang:'cs', limit:1..12, kind:'address'|'place'|null }
 export async function geoSearch(q, o = {}) {
-  const opt = { cc: String(o.cc || '').toLowerCase().replace(/[^a-z,]/g, '').slice(0, 64), lang: String(o.lang || 'cs').slice(0, 5),
+  // NÁZVY VŽDY MÍSTNÍ (Praha, ne Prague / Prag): ukládají se k profilu, klubu i poptávce a podle
+  // nich se města slučují -- jazyk appky by z jednoho města udělal dvě. Vzdálenost řeší souřadnice.
+  const opt = { cc: String(o.cc || '').toLowerCase().replace(/[^a-z,]/g, '').slice(0, 64), lang: '',
     limit: Math.max(1, Math.min(12, parseInt(o.limit, 10) || 8)), kind: o.kind || null,
     near: (o.near && isFinite(+o.near.lat) && isFinite(+o.near.lng)) ? { lat: Math.round(+o.near.lat * 100) / 100, lng: Math.round(+o.near.lng * 100) / 100 } : null };
   const p = providerName();
@@ -242,7 +247,7 @@ export async function geoSearch(q, o = {}) {
   return rows.filter((x) => _ccOk(x, opt.cc) && isFinite(parseFloat(x.lat)) && isFinite(parseFloat(x.lon))).map((x) => Object.assign(x, { provider: p }));
 }
 export async function geoReverse(lat, lon, o = {}) {
-  const opt = { lang: String(o.lang || 'cs').slice(0, 5), zoom: Math.max(3, Math.min(18, parseInt(o.zoom, 10) || 10)) };
+  const opt = { lang: '', zoom: Math.max(3, Math.min(18, parseInt(o.zoom, 10) || 10)) };
   const p = providerName();
   let out;
   if (p === 'mapbox') out = await mbReverse(lat, lon, opt);

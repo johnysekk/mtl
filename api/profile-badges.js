@@ -68,7 +68,7 @@ export default async function handler(req, res) {
     let refN = 0; try { const rf = await sb('profiles?referred_by=eq.' + id + '&referral_rewarded=eq.true&select=id'); refN = (rf||[]).length; } catch(e){}
     let gymRefN = 0; try { const gr = await sb('gyms?referred_by=eq.' + id + '&referral_rewarded=eq.true&select=id'); gymRefN = (gr||[]).length; } catch(e){}
     let coachRefN = 0; try { const cr = await sb('profiles?referred_by=eq.' + id + '&ref_coach_qualified=eq.true&select=id'); coachRefN = (cr||[]).length; } catch(e){}
-    const studentXp = s1*10 + sg*2 + refN*10 + gymRefN*50 + coachRefN*50;
+    let studentXp = s1*10 + sg*2 + refN*10 + gymRefN*50 + coachRefN*50;
 
     // distinct sports + coaches (for milestones)
     const sportSet = new Set(); sBk.forEach(b => { if(b.discipline) sportSet.add(b.discipline); });
@@ -99,6 +99,16 @@ export default async function handler(req, res) {
       gev = await sbCount('events?gym_id=eq.' + gid + '&status=eq.approved&starts_at=lt.' + NOW + '&select=id');
       gymXp = cls + gev * 40;
     }
+
+    // XP STEJNĚ JAKO VŠUDE JINDE: databázová funkce mtl_xp_for (sql/rls-3-public.sql) -- má
+    // i odebrané XP (Admin → Uživatelé → XP) a pravidla pro akce. Kdyby nebyla dostupná, zůstane
+    // výpočet výš (bez odebraných XP).
+    const xpRpc = async (pid, role) => { try { const r = await fetch(SUPABASE_URL + '/rest/v1/rpc/mtl_xp_for', { method: 'POST',
+      headers: { apikey: SERVICE_KEY, Authorization: 'Bearer ' + SERVICE_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ p_id: pid, p_role: role }) });
+      if (!r.ok) return null; const v = await r.json(); return (typeof v === 'number') ? v : (isFinite(Number(v)) ? Number(v) : null); } catch (e) { return null; } };
+    { const v = await xpRpc(id, 'student'); if (v != null) studentXp = v; }
+    if (isCoach) { const v = await xpRpc(id, 'coach'); if (v != null) coachXp = v; }
+    if (ownsGym) { const v = await xpRpc(myG[0].id, 'gym'); if (v != null) gymXp = v; }
 
     // 5) levels payload (only roles the person actually has)
     const levels = [];
