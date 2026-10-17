@@ -790,6 +790,22 @@ export default async function handler(req, res) {
           }
         } catch (e) { console.error('consume credit', e.message); }
       }
+      // Víc bodů najednou (referral sleva na permanentku / členství = 4 body). Každý řádek se
+      // přepne jen jednou (filtr consumed=false), počítadlo se sníží o tolik, kolik jsme jich přepnuli.
+      if (m.mtl_credit_rows && m.mtl_credit_user) {
+        try {
+          let _n = 0;
+          for (const _rid of String(m.mtl_credit_rows).split(',').filter(Boolean)) {
+            const _u = await sbPatch('referral_credits', `id=eq.${encodeURIComponent(_rid)}&consumed=eq.false`, { consumed: true }, 'return=representation');
+            if (Array.isArray(_u) && _u.length) _n++;
+          }
+          if (_n) {
+            const _p = await sbGet(`profiles?id=eq.${encodeURIComponent(m.mtl_credit_user)}&select=student_credits`);
+            const _sc = (_p && _p[0]) ? Number(_p[0].student_credits || 0) : 0;
+            await sbPatch('profiles', `id=eq.${encodeURIComponent(m.mtl_credit_user)}`, { student_credits: Math.max(0, _sc - _n) });
+          }
+        } catch (e) { console.error('consume credits', e.message); }
+      }
       // ZAPLACENO -> řádek v appce (rezervace, členství, lístek, zboží, doplatek). Jen server, jen
       // podle zaplacené session; /api/session dělá totéž při návratu, kdo dřív, ten zapíše.
       let _ful = null;

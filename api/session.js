@@ -100,6 +100,23 @@ export default async function handler(req, res) {
         _cred = { consumed: false, reason: 'no mtl_credit_row in session metadata' };
       }
     } catch (e) { _cred = { consumed: false, reason: 'exception: ' + e.message }; }
+    // víc bodů najednou (referral sleva na permanentku / členství) -- stejně jako webhook
+    try {
+      const m3 = session.metadata || {};
+      if (m3.mtl_credit_rows && m3.mtl_credit_user && sessionPaid(session)) {
+        let n = 0;
+        for (const rid of String(m3.mtl_credit_rows).split(',').filter(Boolean)) {
+          const u = await sbPatchRet(`referral_credits?id=eq.${encodeURIComponent(rid)}&consumed=eq.false`, { consumed: true });
+          if (u.length > 0) n++;
+        }
+        if (n) {
+          const pr = await sbGet(`profiles?id=eq.${encodeURIComponent(m3.mtl_credit_user)}&select=student_credits`);
+          const c0 = (pr && pr[0] && pr[0].student_credits) || 0;
+          await sbPatch(`profiles?id=eq.${encodeURIComponent(m3.mtl_credit_user)}`, { student_credits: Math.max(0, c0 - n) });
+          _cred = { consumed: true, rows: n };
+        }
+      }
+    } catch (e) { console.error('consume credits', e.message); }
 
     // EXCLUSIVE PARTNER ZAPLACEN: když webhook ještě nedorazil, zapne se EP tady (_ep.js zapíše
     // jen jednou). Rozhoduje Stripe (zaplacená session na účtu MTL), ne appka -- dřív si appka

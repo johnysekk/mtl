@@ -45,6 +45,24 @@ async function _wsbPatch(path, body){
 // to a checkout URL and pay up to 50% less while MTL collected NOTHING - the provider ate the
 // discount. record-cash.js (the bank track) already refuses to trust the client here; the Stripe
 // track did not. Returns the referral_credits row id when the credit is real, else null.
+// BODY JEN ZA SEBE: kredit se uplatní, jen když platí přihlášený majitel kreditu (token v hlavičce).
+// Dřív stačilo dát do adresy cizí studentId a spálit (a využít) cizí body.
+async function _creditOwnerOk(req, studentId){
+  const u = await _authUser(req);
+  return !!(u && studentId && String(u.id) === String(studentId));
+}
+// n nespotřebovaných, platných bodů (řádky referral_credits) -> jejich id, jinak null.
+async function verifyStudentCredits(studentId, n){
+  if(!studentId || !(n > 0)) return null;
+  try{
+    const prof = await _wsbGet(`profiles?id=eq.${encodeURIComponent(studentId)}&select=student_credits`);
+    const sc = (prof && prof[0]) ? Number(prof[0].student_credits || 0) : 0;
+    if(sc < n) return null;
+    const nowIso = new Date().toISOString();
+    const rows = await _wsbGet(`referral_credits?user_id=eq.${encodeURIComponent(studentId)}&consumed=eq.false&expires_at=gt.${encodeURIComponent(nowIso)}&select=id&order=earned_at.asc&limit=${n}`);
+    return (rows && rows.length >= n) ? rows.map((r) => String(r.id)) : null;
+  }catch(e){ console.error('verifyStudentCredits', e.message); return null; }
+}
 async function verifyStudentCredit(studentId){
   if(!studentId) return null;
   try{
@@ -189,7 +207,7 @@ async function coachCheckout(req, res) {
   }
   let MK = 1.00; // no markup — student pays exactly the listed price
   let STUDENT_MARKUP = MK;
-  const _credRow = (String(credit) === 'student') ? await verifyStudentCredit(studentId) : null;
+  const _credRow = (String(credit) === 'student' && await _creditOwnerOk(req, studentId)) ? await verifyStudentCredit(studentId) : null;
   if (_credRow) {
     // Referral reward: MTL waives its whole fee; the provider funds the rest of the discount.
     // Only ever reached when the credit was VERIFIED against the DB above.
@@ -347,7 +365,7 @@ async function gymCheckout(req, res) {
     console.error('pay.gym effectiveRate failed:', e.message);
     return res.status(503).json({ error: 'Platbu teď nejde spustit (nepodařilo se ověřit sazbu). Zkus to prosím za chvíli.' });
   }
-  const _credRow = (String(credit) === 'student') ? await verifyStudentCredit(studentId) : null;
+  const _credRow = (String(credit) === 'student' && await _creditOwnerOk(req, studentId)) ? await verifyStudentCredit(studentId) : null;
   if (_credRow) {
     // Referral reward on a drop-in: MTL waives its whole fee; the gym/coach funds the rest.
     // Only ever reached when the credit was VERIFIED against the DB above.
@@ -604,6 +622,27 @@ async function membershipCheckout(req, res) {
   const cur = String(currency).toLowerCase();
   const ivl = interval === 'year' ? 'year' : 'month';
   if (!(await _assertAcctReady(gymAccount, res))) return;
+  // REFERRAL SLEVA NA PERMANENTKU / ČLENSTVÍ: 4 body = 20 % (první permanentka / členství u toho
+  // klubu, tj. ještě tam nic nezaplatil), jinak 10 %. Vždy jen z ceny PRVNÍHO MĚSÍCE (u předplatného
+  // z první platby, u předplacených měsíců z ceny jednoho z nich) -- stejně jako akvizice. MTL na tu
+  // první měsíční část nebere nic, zbytek slevy nese klub. Jen u klubu se zapnutými referral slevami,
+  // jen za sebe (přihlášený = člověk, pro kterého členství je) a jen když platba proběhne hned.
+  const REF_POINTS = 4;
+  let _ref = null;
+  if (String(_q0.credit || '') === 'student' && membershipId) {
+    try {
+      const _mrR = ((await _wsbGet(`gym_memberships?id=eq.${encodeURIComponent(membershipId)}&select=student_id,gym_id,status,paid_to`)) || [])[0] || null;
+      const _gR = (_mrR && _mrR.gym_id) ? (((await _wsbGet(`gyms?id=eq.${encodeURIComponent(_mrR.gym_id)}&select=id,referral_optin`)) || [])[0] || null) : null;
+      if (_mrR && _mrR.status === 'pending' && _gR && _gR.referral_optin !== false && !(_cal && _cal.sub && _cal.sub.kind === 'anchor')
+          && await _creditOwnerOk(req, _mrR.student_id)) {
+        const _rows = await verifyStudentCredits(_mrR.student_id, REF_POINTS);
+        if (_rows) {
+          const d = await _refDiscFor(_mrR.student_id, { gymId: _mrR.gym_id });
+          _ref = { rows: _rows, user: String(_mrR.student_id), pct: d };
+        }
+      }
+    } catch (e) { console.error('membership referral', e.message); _ref = null; }
+  }
   // SAZBA JEN ZE SERVERU (_rate.js): žebříček / stupeň EP + akvizice, u delšího období rozložená
   // na měsíce, kterých se akvizice týká. Dřív přišla z adresy (fee=) a server ji jen hlídal
   // rozsahem 0,5–10 % -- kupující si ji tak mohl snížit a nulová sazba (EP Kage) by neprošla.
@@ -633,10 +672,15 @@ async function membershipCheckout(req, res) {
   // Jednorázově i měsíc (once=1): klub nabízí „Měsíční (jednorázově)" -- bez předplatného.
   if (_months > 1 || _once) {
     const _D1 = _att ? Math.min(_att.amount, P) : 0;
+    // cena jednoho měsíce z téhle platby (kalendářní první měsíc může být poměrný -- bere se průměr)
+    const _mBase = P / _months;
+    const _DR = _ref ? Math.min(Math.max(0, P - _D1), cur === 'czk' ? Math.floor(_mBase * _ref.pct) : Math.round(_mBase * _ref.pct * 100) / 100) : 0;
     if (_att && membershipId) await _wsbPatch(`gym_memberships?id=eq.${encodeURIComponent(membershipId)}`, { att_disc: _D1, att_disc_from: _att.prevId, att_disc_for: _att.prevEnd, amount: P - _D1 });
-    const _amtMinor = Math.round((P - _D1) * 100);
+    const _amtMinor = Math.round((P - _D1 - _DR) * 100);
     const _feePct = FEE_NOW;
-    const _feeMinor = Math.round(_amtMinor * (_feePct / 100));
+    // S body MTL na první měsíc nebere nic: provize jen z částky nad první měsíc.
+    const _feeBaseMinor = _ref ? Math.max(0, Math.round((P - _D1 - _mBase) * 100)) : _amtMinor;
+    const _feeMinor = Math.round(_feeBaseMinor * (_feePct / 100));
     const _meta = {
       mtl_payment_type: 'membership',
       mtl_membership_kind: 'one_time',
@@ -655,6 +699,7 @@ async function membershipCheckout(req, res) {
       mtl_currency: cur,
       member_name: memberName || '',
       ...(_D1 ? { mtl_att_disc: String(_D1), mtl_att_info: _att.summary } : {}),
+      ...(_DR ? { mtl_credit_rows: _ref.rows.join(','), mtl_credit_user: _ref.user, mtl_ref_pct: String(Math.round(_ref.pct * 100)), mtl_ref_disc: String(_DR) } : {}),
     };
     const _s1 = await stripe.checkout.sessions.create(
       {
@@ -664,7 +709,7 @@ async function membershipCheckout(req, res) {
         tax_id_collection: { enabled: true },
         metadata: _meta,
         line_items: [
-          { price_data: { currency: cur, product_data: { name: `${_skLbl} · ${planName || _skLbl} (${_cal && _cal.one ? `do ${_dmy(_cal.one.endsOn)}` : `${_months} měs.`}) — ${gymName || ''}${_D1 ? ` · sleva za docházku −${_D1} ${cur === 'czk' ? 'Kč' : cur.toUpperCase()}` : ''}` }, unit_amount: _amtMinor }, quantity: 1 }
+          { price_data: { currency: cur, product_data: { name: `${_skLbl} · ${planName || _skLbl} (${_cal && _cal.one ? `do ${_dmy(_cal.one.endsOn)}` : `${_months} měs.`}) — ${gymName || ''}${_D1 ? ` · sleva za docházku −${_D1} ${cur === 'czk' ? 'Kč' : cur.toUpperCase()}` : ''}${_DR ? ` · referral sleva ${Math.round(_ref.pct * 100)} % z 1. měsíce −${_DR} ${cur === 'czk' ? 'Kč' : cur.toUpperCase()}` : ''}` }, unit_amount: _amtMinor }, quantity: 1 }
         ],
         payment_intent_data: {
           ...(_feeMinor > 0 ? { application_fee_amount: _feeMinor } : {}),
@@ -673,7 +718,7 @@ async function membershipCheckout(req, res) {
         ..._checkoutEnd(req, `${proto}://${host}/?gym_sub=ok&membership=${encodeURIComponent(membershipId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`, `${proto}://${host}/`),
         // Se slevou za docházku platí platba jen 31 minut -- tak dlouho drží slevu jen tenhle řádek
         // (_att-disc.js ATT_HOLD_MIN), aby se nedala zaplatit dvakrát.
-        ...(_D1 ? { expires_at: Math.floor(Date.now() / 1000) + 31 * 60 } : {}),
+        ...((_D1 || _DR) ? { expires_at: Math.floor(Date.now() / 1000) + 31 * 60 } : {}),
       },
       { stripeAccount: gymAccount }
     );
@@ -699,19 +744,25 @@ async function membershipCheckout(req, res) {
   const _subMeta = (_cs && _cs.kind !== 'plain') ? { mtl_calendar: '1' } : {};
   // Sleva za docházku u předplatného: na první platbu. Strhává-li se hned (běžně nebo zbytek
   // měsíce), kupón „jednou"; když první platba přijde až s kotvou, položku přidá webhook.
-  let _attMeta = {}, _discounts = null;
+  let _attMeta = {}, _discounts = null, _refMeta = {};
+  const _firstNow = (_cs && _cs.kind === 'first') ? _cs.chargeNow : ((_cs && _cs.kind === 'anchor') ? 0 : P);
+  let _D2 = 0;
   if (_att) {
-    const _firstNow = (_cs && _cs.kind === 'first') ? _cs.chargeNow : ((_cs && _cs.kind === 'anchor') ? 0 : P);
-    const _D2 = Math.min(_att.amount, _firstNow > 0 ? _firstNow : P);
+    _D2 = Math.min(_att.amount, _firstNow > 0 ? _firstNow : P);
     if (_D2 > 0) {
-      if (_firstNow > 0) {
-        const _cp = await stripe.coupons.create({ amount_off: Math.round(_D2 * 100), currency: cur, duration: 'once', max_redemptions: 1, name: 'Sleva za docházku' }, { stripeAccount: gymAccount });
-        _discounts = [{ coupon: _cp.id }];
-      }
       _attMeta = { mtl_att_disc: String(_D2), mtl_att_info: _att.summary, mtl_att_mode: _firstNow > 0 ? 'coupon' : 'next' };
       if (membershipId) await _wsbPatch(`gym_memberships?id=eq.${encodeURIComponent(membershipId)}`, { att_disc: _D2, att_disc_from: _att.prevId, att_disc_for: _att.prevEnd });
     }
   }
+  // Referral sleva na první platbu (z měsíční ceny; když se strhává jen zbytek měsíce, nejvýš z něj).
+  const _DR2 = (_ref && _firstNow > 0) ? Math.min(Math.max(0, _firstNow - (_attMeta.mtl_att_mode === 'coupon' ? _D2 : 0)), cur === 'czk' ? Math.floor(P * _ref.pct) : Math.round(P * _ref.pct * 100) / 100) : 0;
+  if (_DR2 > 0) _refMeta = { mtl_credit_rows: _ref.rows.join(','), mtl_credit_user: _ref.user, mtl_ref_pct: String(Math.round(_ref.pct * 100)), mtl_ref_disc: String(_DR2) };
+  { const _cpAmt = (_attMeta.mtl_att_mode === 'coupon' ? _D2 : 0) + _DR2;
+    if (_cpAmt > 0) {
+      const _cpName = [_attMeta.mtl_att_mode === 'coupon' ? 'Sleva za docházku' : '', _DR2 > 0 ? `Referral sleva ${Math.round(_ref.pct * 100)} % z 1. měsíce` : ''].filter(Boolean).join(' + ');
+      const _cp = await stripe.coupons.create({ amount_off: Math.round(_cpAmt * 100), currency: cur, duration: 'once', max_redemptions: 1, name: _cpName.slice(0, 40) }, { stripeAccount: gymAccount });
+      _discounts = [{ coupon: _cp.id }];
+    } }
 
   const session = await stripe.checkout.sessions.create(
     {
@@ -729,12 +780,15 @@ async function membershipCheckout(req, res) {
         mtl_base: String(P),
         mtl_currency: cur,
         ..._attMeta,
+        ..._refMeta,
       },
       line_items: _subLines,
       ...(_discounts ? { discounts: _discounts } : {}),
-      ...(_attMeta.mtl_att_disc ? { expires_at: Math.floor(Date.now() / 1000) + 31 * 60 } : {}),
+      ...((_attMeta.mtl_att_disc || _refMeta.mtl_ref_disc) ? { expires_at: Math.floor(Date.now() / 1000) + 31 * 60 } : {}),
       subscription_data: {
-        application_fee_percent: FEE_NOW,
+        // S body MTL z první platby nebere nic; po jejím zaplacení webhook (applySubRate) nastaví
+        // běžnou sazbu -- první faktura už je zaplacená, takže akvizice ani nula se znovu nepoužijí.
+        application_fee_percent: _refMeta.mtl_ref_disc ? 0 : FEE_NOW,
         ..._subTiming,
         metadata: {
           ..._subMeta,
