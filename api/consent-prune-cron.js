@@ -25,7 +25,7 @@ const MIN_AGE_DAYS = 30, WINDOW_DAYS = 7, MAX_DELETE = 500;
 async function sb(path, init = {}) {
   const r = await fetch(`${SB}/rest/v1/${path}`, { ...init, headers: { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json', ...(init.prefer ? { Prefer: init.prefer } : {}) } });
   if (!r.ok) throw new Error(`SB ${r.status}: ${await r.text()}`);
-  return r.status === 204 ? null : r.json();
+  if (r.status === 204) return null; const _t = await r.text(); return _t ? JSON.parse(_t) : null;   // POST s return=minimal vrací 201 s prázdným tělem
 }
 const any = async (path) => { try { const r = await sb(path + '&limit=1'); return !!(r && r.length); } catch (e) { return true; } };   // při chybě radši nechat
 

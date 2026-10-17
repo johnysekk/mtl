@@ -21,7 +21,7 @@
 
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const FOUNDER = process.env.FOUNDER_UUID || '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
+const FOUNDER = (process.env.FOUNDER_UUID || '').trim();
 // Stejná verze jako KID_CONSENT_VERSION v index.html -- při změně souhlasu změnit obě.
 const KID_CONSENT_VERSION = process.env.KID_CONSENT_VERSION || '2026-06-v1';
 
@@ -37,7 +37,7 @@ async function sb(path, init = {}) {
     },
   });
   if (!r.ok) throw new Error(await r.text());
-  return r.status === 204 ? null : r.json();
+  if (r.status === 204) return null; const _t = await r.text(); return _t ? JSON.parse(_t) : null;   // POST s return=minimal vrací 201 s prázdným tělem
 }
 const q = encodeURIComponent;
 

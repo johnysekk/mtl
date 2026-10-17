@@ -24,7 +24,7 @@ async function sb(path, init = {}) {
       ...(init.prefer ? { Prefer: init.prefer } : {}) },
   });
   if (!r.ok) throw new Error(await r.text());
-  return r.status === 204 ? null : r.json();
+  if (r.status === 204) return null; const _t = await r.text(); return _t ? JSON.parse(_t) : null;   // POST s return=minimal vrací 201 s prázdným tělem
 }
 async function whoami(req) {
   const tok = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();

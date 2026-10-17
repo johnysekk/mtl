@@ -31,7 +31,7 @@ async function sb(path, init = {}) {
   const r = await fetch(`${SB}/rest/v1/${path}`, { ...init,
     headers: { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json', ...(init.prefer ? { Prefer: init.prefer } : {}) } });
   if (!r.ok) throw new Error(await r.text());
-  return r.status === 204 ? null : r.json();
+  if (r.status === 204) return null; const _t = await r.text(); return _t ? JSON.parse(_t) : null;   // POST s return=minimal vrací 201 s prázdným tělem
 }
 const sbGet = (p) => sb(p).catch(() => []);
 async function whoami(req) {

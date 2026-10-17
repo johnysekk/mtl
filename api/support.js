@@ -15,7 +15,7 @@
 
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const FOUNDER = process.env.FOUNDER_UUID || '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
+const FOUNDER = (process.env.FOUNDER_UUID || '').trim();
 const RESEND = process.env.RESEND_API_KEY;
 const MAIL_FROM = process.env.MAIL_FROM || 'MTL <noreply@martialtraininglab.com>';
 const SUPPORT_TO = (process.env.SUPPORT_EMAIL || process.env.FOUNDER_EMAIL || '').trim();
@@ -43,7 +43,7 @@ async function sb(path, init = {}) {
     },
   });
   if (!r.ok) throw new Error(await r.text());
-  return r.status === 204 ? null : r.json();
+  if (r.status === 204) return null; const _t = await r.text(); return _t ? JSON.parse(_t) : null;   // POST s return=minimal vrací 201 s prázdným tělem
 }
 
 async function whoami(req) {

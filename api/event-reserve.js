@@ -29,7 +29,7 @@ async function sb(path, init = {}) {
       ...(init.prefer ? { Prefer: init.prefer } : {}) },
   });
   if (!r.ok) throw new Error(await r.text());
-  return r.status === 204 ? null : r.json();
+  if (r.status === 204) return null; const _t = await r.text(); return _t ? JSON.parse(_t) : null;   // POST s return=minimal vrací 201 s prázdným tělem
 }
 function ipOf(req) {
   const xr = req.headers['x-real-ip']; if (xr) return String(xr).trim();

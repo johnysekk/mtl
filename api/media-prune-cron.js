@@ -21,7 +21,7 @@ async function sb(path, opts = {}) {
     headers: { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json', ...(opts.headers || {}) },
   });
   if (!r.ok) throw new Error(`SB ${r.status} ${path}: ${(await r.text()).slice(0, 200)}`);
-  return r.status === 204 ? null : r.json();
+  if (r.status === 204) return null; const _t = await r.text(); return _t ? JSON.parse(_t) : null;   // POST s return=minimal vrací 201 s prázdným tělem
 }
 
 async function listBucket(bucket) {
