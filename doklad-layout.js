@@ -95,7 +95,7 @@ export function rcptItems(dk) {
 // ── TEXTY ────────────────────────────────────────────────────────────────────────────────────
 const TX = {
   cs: { supplier: 'Dodavatel', customer: 'Odběratel', provider: 'Poskytovatel služby', participant: 'Účastník', orderedBy: 'Objednal(a)',
-    invNo: 'Číslo faktury', docNo: 'Číslo dokladu', issued: 'Datum vystavení', duzp: 'Datum uskutečnění plnění',
+    invNo: 'Číslo faktury', docNo: 'Číslo dokladu', issued: 'Datum vystavení', duzp: 'Datum uskutečnění plnění', duzpTax: 'Datum uskutečnění zdanitelného plnění',
     period: 'Období', subPeriod: 'Období předplatného', billedAs: 'Fakturováno za', method: 'Způsob úhrady', card: 'Platební karta',
     session: 'Termín lekce', payRef: 'Reference platby (Stripe)',
     regno: 'IČO', vatid: 'DIČ', register: 'Zapsáno v obchodním rejstříku', registerStudent: 'Zápis v rejstříku', phone: 'Tel.', email: 'E-mail',
@@ -117,7 +117,7 @@ const TX = {
     studentNote: 'Platné potvrzení o zaplacení pro tvé účely. Poskytovatel služby je uveden výše. MTL platbu jen zprostředkovává. Potřebuješ formální daňový doklad (fakturu)? Vyžádej si ho u poskytovatele. Vygenerováno přes MTL.',
     payment: 'Platba', invoice: 'faktura', invoices: 'faktury' },
   en: { supplier: 'Supplier', customer: 'Customer', provider: 'Service provider', participant: 'Participant', orderedBy: 'Ordered by',
-    invNo: 'Invoice no.', docNo: 'Document no.', issued: 'Issued', duzp: 'Date of supply',
+    invNo: 'Invoice no.', docNo: 'Document no.', issued: 'Issued', duzp: 'Date of supply', duzpTax: 'Date of taxable supply',
     period: 'Period', subPeriod: 'Subscription period', billedAs: 'Billed as', method: 'Payment method', card: 'Payment card',
     session: 'Session date', payRef: 'Payment ref (Stripe)',
     regno: 'Reg. number', vatid: 'VAT ID', register: 'Commercial register', registerStudent: 'Registration', phone: 'Phone', email: 'E-mail',
@@ -233,7 +233,12 @@ export function mtlModel(dk, lang, opts) {
     dk.cust_phone ? (T.phone + ': ' + dk.cust_phone) : '', dk.cust_email ? (T.email + ': ' + dk.cust_email) : ''].filter(Boolean);
   m.parties = [{ label: T.supplier, lines: sup }, { label: T.customer, lines: cust }];
   m.status = mtlStatus(dk, lang);
-  const duzp = dk.duzp ? D(String(dk.duzp).slice(0, 10)) : '';
+  // DATUM USKUTEČNĚNÍ PLNĚNÍ je na každém dokladu MTL; plátce DPH má „zdanitelného plnění".
+  // Starší doklad bez zapsaného data: provize = poslední den účtovaného měsíce, jinak den vystavení.
+  const T_duzp = dk.sup_vat_payer ? T.duzpTax : T.duzp;
+  const _pm = /^(\d{4})-(\d{2})$/.exec(String(dk.period_month || ''));
+  const duzp = dk.duzp ? D(String(dk.duzp).slice(0, 10))
+    : (_pm ? D(new Date(Date.UTC(+_pm[1], +_pm[2], 0)).toISOString().slice(0, 10)) : D(dk.issued_at || dk.charged_at));
   // DPH: rozpis jen u plátce s domácím plněním (a u EP spotřebiteli z EU pod limitem); jinak věta o režimu.
   const rate = dk.sup_vat_rate != null ? Number(dk.sup_vat_rate) : 21;
   const vatShow = !!dk.sup_vat_payer && rate > 0 && (!dk.vat_mode || dk.vat_mode === 'domestic' || dk.vat_mode === 'b2c_eu_small');
@@ -254,7 +259,7 @@ export function mtlModel(dk, lang, opts) {
     m.title = isSup ? T.tSup : T.tEp;
     // Období od–do; Stripe dává konec jako začátek dalšího období, proto o den méně.
     const per = subPeriod(dk, lang);
-    m.facts = twoCols([[T.invNo, docNo(dk)], [T.subPeriod, per], [T.method, m.status.paid ? T.card : '']], [[T.duzp, duzp], [T.issued, D(dk.issued_at || dk.charged_at)]]);
+    m.facts = twoCols([[T.invNo, docNo(dk)], [T.subPeriod, per], [T.method, m.status.paid ? T.card : '']], [[T_duzp, duzp], [T.issued, D(dk.issued_at || dk.charged_at)]]);
     // Položka podle snímku (česky label, anglicky label_en -- má ho doklad od stupňů EP); starší
     // doklady bez anglického názvu: druh + měsíc.
     const label = en ? (li.label_en || ((isSup ? T.iSup : T.iEp) + ' ' + String(dk.period_month || ''))) : (li.label || ((isSup ? T.iSup : T.iEp) + ' ' + String(dk.period_month || '')));
@@ -262,7 +267,7 @@ export function mtlModel(dk, lang, opts) {
   } else {
     m.title = T.tCommission;
     const kind = dk.organization_id ? T.kOrg : (dk.gym_id ? T.kGym : (dk.billing_identity === 'payout' ? T.kCoachPayout : T.kCoach));
-    m.facts = twoCols([[T.invNo, docNo(dk)], [T.period, periodLabel(dk.period_month, lang)], [T.billedAs, kind]], [[T.duzp, duzp], [T.issued, D(dk.charged_at)]]);
+    m.facts = twoCols([[T.invNo, docNo(dk)], [T.period, periodLabel(dk.period_month, lang)], [T.billedAs, kind]], [[T_duzp, duzp], [T.issued, D(dk.charged_at)]]);
     // Řádek obchodu s aplikacemi (online koučink z nativní appky) není provize MTL -- poplatek Apple / Google.
     const lbl = (i) => i.store ? (T.storeFee + ((i.method && i.method !== 'stripe') ? (' · ' + _method(i.method, lang)) : ''))
                                : (_method(i.method, lang) + (i.acq ? (' · ' + T.acq) : ''));
@@ -321,7 +326,7 @@ export function studentModel(dk, lang, opts) {
   const duzpS = isPayer ? (dk.duzp ? fmtDate(String(dk.duzp).slice(0, 10), lang) : D(dk.issued_at)) : '';
   m.facts = twoCols([[T.docNo, dk.doklad_no || ''],
     [T.session, sDate ? ((fmtDate(sDate, lang) || sDate) + (sTime ? (' ' + sTime) : '')) : ''],
-    [T.payRef, ref]], [[T.duzp, duzpS], [T.issued, D(dk.issued_at)]]);
+    [T.payRef, ref]], [[T.duzpTax, duzpS], [T.issued, D(dk.issued_at)]]);
   let item = String(dk.item_label || '').trim() || T.payment;
   if (en) item = itemLabelEn(item);
   m.table = { cols: [{ t: T.item, w: 4 }, { t: T.amount, a: 'r', w: 1.4 }], rows: [[item, money(dk.amount, cur, lang)]] };
