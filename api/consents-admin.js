@@ -17,7 +17,7 @@ const FOUNDER_UUID = (process.env.FOUNDER_UUID || '').trim();
 const svc = { apikey: SKEY, Authorization: `Bearer ${SKEY}`, 'Content-Type': 'application/json' };
 
 // Druhy souhlasů podle toho, KDO je dává. Podle toho se dělí větve u MTL.
-const PROVIDER_KINDS = ['provider_terms', 'partner', 'receiver_declaration', 'provider_marketing'];
+const PROVIDER_KINDS = ['provider_terms', 'partner', 'receiver_declaration', 'provider_marketing', 'profile_deletion', 'profile_restore'];
 
 async function sbGet(path) {
   try { const r = await fetch(`${SB}/rest/v1/${path}`, { headers: svc }); return r.ok ? await r.json() : []; }

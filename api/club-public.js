@@ -145,8 +145,9 @@ export default async function handler(req, res) {
     const ids = [...new Set((links || []).map(l => l.coach_id).filter(Boolean))];
     if (g.owner_id) ids.push(g.owner_id);
     if (ids.length) {
-      const profs = await sbGet(`profiles?id=in.(${ids.join(',')})&select=id,name,photo_url,disciplines,referral_code&limit=40`);
-      coaches = (profs || []).filter(p => p.name);
+      const profs = await sbGet(`profiles?id=in.(${ids.join(',')})&select=id,name,photo_url,disciplines,referral_code,deleted_at,deactivated_at,coach_closing_at,coach_paused_at,account_suspended&limit=40`);
+      // Trenér, který se ruší nebo je pozastavený, na veřejné stránce není.
+      coaches = (profs || []).filter(p => p.name && !p.deleted_at && !p.deactivated_at && !p.coach_closing_at && !p.coach_paused_at && !p.account_suspended);
       // Doporučovací kód MAJITELE. Nese ho tlačítko vedle own=1 (viz linkOwn níž).
       const _ow = (profs || []).find(p => p.id === g.owner_id);
       ownerRef = (_ow && _ow.referral_code) || '';

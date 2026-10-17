@@ -4,10 +4,11 @@
 // → plánované načítání) a z položek skládá reklamy. Kampaň se tím staví jednou; nové kluby
 // do ní naskakují samy a zrušené z ní vypadnou při dalším načtení.
 //
-// DVĚ POJISTKY, obě povinné:
+// TŘI POJISTKY, všechny povinné:
 //   1) hlavní vypínač programu (platform_settings.ads_program_on) — dokud je vypnutý,
 //      feed je prázdný, ať se o adrese dozví kdokoli
 //   2) souhlas klubu (gyms.ads_opt_in) — bez něj se klub do reklamy nedostane
+//   3) majitel klubu je Exclusive Partner (od Genina) — reklama od MTL je výhoda EP
 //
 // Odkaz v položce nese ?mtlads=1&club=<id>, takže se příchod z reklamy sám označí jako
 // mtl_ads a účtuje se podle toho (viz _rate.js).
@@ -15,6 +16,8 @@
 // Formát: CSV, protože ho Meta bere přímo a nepotřebuje k tomu nic dalšího.
 // GET /api/meta-feed            → CSV
 // GET /api/meta-feed?format=json → totéž jako JSON (na ladění)
+
+import { epTierOf } from './_rate.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -68,12 +71,20 @@ export default async function handler(req, res) {
     let rows = [];
     if (on) {
       const gyms = await sbGet(
-        'gyms?ads_opt_in=eq.true&status=eq.approved&deleted_at=is.null&suspended=eq.false' +
+        'gyms?ads_opt_in=eq.true&status=eq.approved&deleted_at=is.null&paused_at=is.null&suspended=eq.false' +
         '&select=id,name,city,country,description,photos,dropin_price,currency,account_suspended,' +
-        'payment_mode,stripe_account,charges_enabled,receiver_id_value,receiver_name,commission_card_status,' +
+        'owner_id,payment_mode,stripe_account,charges_enabled,receiver_id_value,receiver_name,commission_card_status,' +
         'legal_name,tax_id,billing_line1,billing_city,billing_postal,billing_country'
       );
+      // Majitelé s EP. Kdo EP zrušil, z feedu vypadne při dalším načtení (souhlas mu zůstane).
+      const _oids = [...new Set((gyms || []).map(g => g.owner_id).filter(Boolean))];
+      const _ep = new Set();
+      for (let i = 0; i < _oids.length; i += 100) {
+        const ps = await sbGet(`profiles?id=in.(${_oids.slice(i, i + 100).join(',')})&select=id,partner,partner_tier`);
+        (ps || []).forEach(p => { if (epTierOf(p)) _ep.add(p.id); });
+      }
       rows = (gyms || [])
+        .filter(g => _ep.has(g.owner_id))         // reklama od MTL jen pro Exclusive Partnery
         .filter(g => !g.account_suspended)         // pozastavený účet se nepropaguje
         // KDO NEUMÍ PŘIJMOUT PLATBU, DO REKLAMY NEPATŘÍ. Stejná podmínka, jaká klub skrývá
         // z decku (canSell v appce, can_sell v databázi) -- jinak bys platil za kliky lidí,

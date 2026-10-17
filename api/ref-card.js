@@ -33,11 +33,11 @@ export default async function handler(req, res) {
   if (!/^[A-Za-z0-9_-]{3,40}$/.test(code)) return res.status(400).json({ error: 'bad code' });
 
   try {
-    const p = (await sbGet(`profiles?referral_code=eq.${encodeURIComponent(code)}&deleted_at=is.null&select=id,name,photo_url,photo_thumb,coach_status,main_discipline&limit=1`) || [])[0];
+    const p = (await sbGet(`profiles?referral_code=eq.${encodeURIComponent(code)}&deleted_at=is.null&deactivated_at=is.null&select=id,name,photo_url,photo_thumb,coach_status,main_discipline&limit=1`) || [])[0];
     if (!p) return res.status(404).json({ error: 'not found' });
 
     // Vlastní schválený klub má přednost: pozvánka od majitele klubu je pozvánka do klubu.
-    const g = (await sbGet(`gyms?owner_id=eq.${encodeURIComponent(p.id)}&status=eq.approved&deleted_at=is.null&select=id,name,brand_logo,city&order=created_at.asc&limit=1`) || [])[0];
+    const g = (await sbGet(`gyms?owner_id=eq.${encodeURIComponent(p.id)}&status=eq.approved&deleted_at=is.null&paused_at=is.null&account_suspended=not.is.true&select=id,name,brand_logo,city&order=created_at.asc&limit=1`) || [])[0];
 
     const isCoach = p.coach_status === 'approved';
     const kind = g ? 'club' : (isCoach ? 'coach' : 'student');

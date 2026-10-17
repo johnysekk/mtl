@@ -61,7 +61,8 @@ export default async function handler(req, res) {
                     : await sbGet(`profiles?id=eq.${encodeURIComponent(id)}&select=*&limit=1`);
   const c = rows && rows[0];
   // Jen schválený a nepozastavený kouč. Odkaz v biu na neaktivní profil škodí kouči i MTL.
-  if (!c || c.coach_status !== 'approved' || c.account_suspended) return notFound(res, origin);
+  // Rušený nebo pozastavený profil (sql/entity-close.sql) veřejnou stránku nemá -- stejně jako pozastavený MTL.
+  if (!c || c.coach_status !== 'approved' || c.account_suspended || c.deleted_at || c.deactivated_at || c.coach_closing_at || c.coach_paused_at) return notFound(res, origin);
 
   const discs = parseJson(c.disciplines, []) || [];
   const curIn = c.currency_inperson || c.currency || 'CZK';
@@ -89,7 +90,7 @@ export default async function handler(req, res) {
     const links = await sbGet(`gym_coaches?coach_id=eq.${encodeURIComponent(c.id)}&status=eq.active&select=gym_id&limit=20`);
     const own = await sbGet(`gyms?owner_id=eq.${encodeURIComponent(c.id)}&select=id&limit=10`);
     const gids = [...new Set([...(links || []).map((l) => l.gym_id), ...(own || []).map((g) => g.id)].filter(Boolean))];
-    if (gids.length) clubs = ((await sbGet(`gyms?id=in.(${gids.join(',')})&status=eq.approved&select=id,name,city,slug,account_suspended&limit=20`)) || []).filter((g) => !g.account_suspended);
+    if (gids.length) clubs = ((await sbGet(`gyms?id=in.(${gids.join(',')})&status=eq.approved&select=id,name,city,slug,account_suspended,suspended,deleted_at,paused_at&limit=20`)) || []).filter((g) => !g.account_suspended && !g.suspended && !g.deleted_at && !g.paused_at);
   } catch (e) { /* stránka se ukáže i bez nich */ }
 
   const reviews = Number(c.reviews) || 0;

@@ -144,6 +144,30 @@ async function restoreOne(ent, me, cascadeOnly, consent) {
   return { restored: true, name: ent.name, kind: ent.kind, resumed: subs.length };
 }
 
+// SOUHLAS DO EVIDENCE SOUHLASŮ (consent_acceptances) -- stejně jako ostatní souhlasy: kdo,
+// kdy, odkud, otisk a přesné znění, které viděl. Admin → Souhlasy uživatelů i Moje souhlasy.
+// account_deletion / account_restore (celý účet), profile_deletion / profile_restore (profil).
+async function recordConsent(req, me, ckind, text, meta) {
+  try {
+    const crypto = await import('crypto');
+    const hash = crypto.createHash('sha256').update(String(text)).digest('hex');
+    const version = 'v1-2026-10', lang = 'cs';
+    let vid = null;
+    const ex = await one(`consent_versions?kind=eq.${q(ckind)}&scope=is.null&version=eq.${version}&lang=eq.${lang}&select=id`);
+    if (ex) vid = ex.id;
+    else {
+      try { const ins = await sb('consent_versions', { method: 'POST', prefer: 'return=representation', body: JSON.stringify({ kind: ckind, scope: null, version, lang, body_text: String(text), body_hash: hash }) }); vid = ins && ins[0] && ins[0].id; }
+      catch (e) { const ag = await one(`consent_versions?kind=eq.${q(ckind)}&scope=is.null&version=eq.${version}&lang=eq.${lang}&select=id`); vid = ag && ag.id; }
+    }
+    const pr = await one(`profiles?id=eq.${q(me)}&select=name,email`);
+    const ip = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.headers['x-real-ip'] || null;
+    await sb('consent_acceptances', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({
+      user_id: me, kind: ckind, scope: null, version, lang, version_id: vid, body_hash: hash,
+      user_name: (pr && pr.name) || null, user_email: (pr && pr.email) || null, accepted_at: new Date().toISOString(),
+      ip, user_agent: req.headers['user-agent'] || null, meta: Object.assign({ body_text_shown: String(text) }, meta || {}) }) });
+  } catch (e) { console.error('[entity-close/consent]', e.message); }
+}
+
 async function mailOwner(me, title, html) {
   const p = await one(`profiles?id=eq.${q(me)}&select=email,lang`);
   if (!p || !p.email) return;
@@ -198,6 +222,8 @@ export default async function handler(req, res) {
         out.entities.push(Object.assign({ kind, name: ent.name }, await closeOne(ent, me, m, deleteAt, reasonKey, reason, consent, false, keepRenew)));
       }
       const dOn = dCz(deleteAt);
+      await recordConsent(req, me, kind === 'account' ? 'account_deletion' : 'profile_deletion', consent,
+        { entity_kind: kind, entity_id: String(ent.id), entity_name: kind === 'account' ? null : ent.name, delete_on: new Date(deleteAt).toISOString().slice(0, 10), mode: m, keep_renew: keepRenew, reason_key: reasonKey });
       // Zakladatel: důvod a proklik na uživatele -- ať stihne zavolat dřív, než se profil smaže.
       try {
         const fid = await founderId();
@@ -232,6 +258,8 @@ export default async function handler(req, res) {
       if (Date.now() > new Date(ent.closingAt).getTime() + CLOSE_DAYS * DAY) return res.status(410).json({ error: 'Lhůta na obnovení uplynula.' });
       const consent = String(b.consent_text || '').trim().slice(0, 4000);
       if (!consent) return res.status(400).json({ error: 'Chybí souhlas s obnovením.' });
+      await recordConsent(req, me, kind === 'account' ? 'account_restore' : 'profile_restore', consent,
+        { entity_kind: kind, entity_id: String(ent.id), entity_name: kind === 'account' ? null : ent.name });
       const done = [await restoreOne(ent, me, false, consent)];
       if (kind === 'account') {
         for (const x of await ownedEntities(me)) { const e = await loadEntity(x.kind, x.id); if (e) done.push(await restoreOne(e, me, true, consent)); }
