@@ -16,6 +16,7 @@ import { isTestMode } from './_config.js';
 
 import { vatMode, vatRateFor } from './_vat.js';
 import { pragueMonth } from './_tz.js';
+import { buyerForSource } from './_doklad-buyer.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -60,7 +61,7 @@ async function sb(path, opts = {}) {
 
 // Řada dokladů: IČO organizace + její účet. Tentýž tvar jako u poskytovatele, aby jeden
 // subjekt měl jednu souvislou řadu.
-async function issueDoklad(org, cust, amount, currency, method, testMode, transactionId, label, paymentIntent) {
+async function issueDoklad(org, cust, amount, currency, method, testMode, transactionId, label, paymentIntent, buyer) {
   try {
     const ico = String(org.tax_id || '').replace(/\s/g, '');
     if (!ico || !org.owner_id) return null;
@@ -98,6 +99,8 @@ async function issueDoklad(org, cust, amount, currency, method, testMode, transa
         // zobrazeni deli stem). Sem prichazi uz gross v halerich, takze se nenasobi.
         amount: Math.round(Number(amount) || 0), currency: String(currency || 'CZK').toUpperCase(),
         payment_method: method || null, test_mode: !!testMode,
+        // NÁKUP NA FIRMU: kupující u vstupenky vyplnil firmu (_doklad-buyer.js).
+        ...(buyer && buyer.cust_company ? buyer : {}),
       }),
     });
     return String(no);
@@ -138,7 +141,7 @@ export default async function handler(req, res) {
 
     if (!organization_id || !(Number(amount) > 0)) return res.status(400).json({ error: 'bad input' });
 
-    const org = (await sb(`organizations?id=eq.${encodeURIComponent(organization_id)}&select=id,name,legal_name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal,billing_country,country,owner_id,status,intro_free_until,kind,account_suspended`))[0];
+    const org = (await sb(`organizations?id=eq.${encodeURIComponent(organization_id)}&select=id,name,legal_name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal,billing_country,country,owner_id,status,kind,account_suspended`))[0];
     if (!org) return res.status(404).json({ error: 'org not found' });
     if (org.status !== 'approved') return res.status(403).json({ error: 'org not approved' });
 
@@ -148,14 +151,14 @@ export default async function handler(req, res) {
       if (dup && dup.length) return res.status(200).json({ ok: true, already: true });
     }
 
-    // Sazba podle typu akce. Fight night a soutěž se zpoplatňují, seminář a školení ne --
-    // orgRate() to řeší na jednom místě, ať se to nerozejde s tím, co appka ukazuje.
+    // Sazba podle druhu organizace (svaz 0 %, pořadatel 1 %) -- orgRate() na jednom místě,
+    // ať se to nerozejde s tím, co appka ukazuje. Typ akce je jen pro popisek dokladu.
     let evType = null;
     if (event_id) {
       const ev = (await sb(`events?id=eq.${encodeURIComponent(event_id)}&select=event_type:type,title`))[0];
       evType = (ev && ev.event_type) || null;
     }
-    const rate = orgRate(org, evType);
+    const rate = orgRate(org);
     const gross = Math.round(Number(amount));
     const fee = Math.round(gross * rate);
     const month = pragueMonth();
@@ -179,10 +182,11 @@ export default async function handler(req, res) {
     });
     const txId = (tx && tx[0] && tx[0].id) || null;
 
-    const label = evType === 'fight_night' ? 'Vstupenka · fight night'
+    const label = evType === 'fight_night' ? 'Vstupenka · galavečer'
                 : evType === 'competition' ? 'Vstupenka · soutěž' : 'Vstupenka';
     const no = await issueDoklad(org, { name: buyer_name, email: buyer_email },
-      gross, currency, payment_method || 'pis', _test, txId, label, payment_intent);
+      gross, currency, payment_method || 'pis', _test, txId, label, payment_intent,
+      (ticket_id ? await buyerForSource('event_ticket', [ticket_id]) : null));
 
     return res.status(200).json({ ok: true, transaction_id: txId, doklad_no: no, mtl_fee: fee, mtl_rate: rate });
   } catch (e) {

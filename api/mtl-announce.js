@@ -1,3 +1,4 @@
+import { shell, esc, button, APP_URL } from './_mail.js';
 // /api/mtl-announce.js — oficiální oznámení od MTL, jednosměrně.
 //
 // PROČ SERVER: rozesílá se tisícům lidí. Z prohlížeče by to znamenalo tisíce zápisů, RLS
@@ -10,12 +11,19 @@
 // POST { audience, subject, body, test } + Authorization: Bearer <access token foundera>
 //   audience: 'all' | 'providers' | 'coaches' | 'gyms' | 'orgs' | 'students'
 //   test: true -> jen spočítá příjemce a NIC neodešle (náhled)
+//   as_message: true -> navíc ZPRÁVA ve vlákně od MTL (sender 'support' = „MTL Support",
+//                'founder' = „MTL Founder"). Vlákno je jen ke čtení (conversations.no_reply):
+//                appka místo pole na psaní ukáže „Nelze odpovědět — v případě nutnosti napiš na
+//                Podporu" a databáze odpověď nepustí (sql/mtl-messages.sql).
+//   as_email: true -> navíc e-mail (Resend, po dávkách 100).
 //
 // Jen founder; ověřuje se token proti databázi, ne id z těla.
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const svc = { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' };
+const RESEND_KEY = process.env.RESEND_API_KEY || process.env.RESEND_KEY;
+const MAIL_FROM = process.env.MAIL_FROM || process.env.INVITE_FROM || 'Martial Training Lab <no-reply@martialtraininglab.com>';
 
 async function sbGet(path) {
   const out = [];
@@ -56,7 +64,7 @@ export default async function handler(req, res) {
     const pr = await sbGet(`profiles?id=eq.${encodeURIComponent(uid)}&select=role`);
     if (!pr.length || pr[0].role !== 'founder') return res.status(403).json({ error: 'founder only' });
 
-    const { audience, subject, body, test } = req.body || {};
+    const { audience, subject, body, test, as_message, sender, as_email } = req.body || {};
     const AUD = ['all', 'providers', 'coaches', 'gyms', 'orgs', 'students'];
     if (AUD.indexOf(audience) < 0) return res.status(400).json({ error: 'audience' });
     const txt = String(body || '').trim();
@@ -117,7 +125,48 @@ export default async function handler(req, res) {
       try { await sbPost('notifications', rows); sent += rows.length; }
       catch (e) { failed += rows.length; console.error('[mtl-announce]', e.message); }
     }
-    return res.status(200).json({ ok: true, audience, sent, failed });
+    // ── ZPRÁVA VE VLÁKNĚ OD MTL ─────────────────────────────────────────────────────
+    let messages = null, emails = null;
+    if (as_message) {
+      const who = sender === 'founder' ? 'founder' : 'support';
+      const label = who === 'founder' ? 'MTL Founder' : 'MTL Support';
+      messages = 0;
+      try {
+        const have = new Map();
+        (await sbGet(`conversations?coach_id=eq.${encodeURIComponent(uid)}&system_sender=eq.${who}&select=id,student_id`)).forEach((c) => have.set(String(c.student_id), c.id));
+        const need = list.filter((id) => !have.has(String(id)) && String(id) !== String(uid));
+        for (let i = 0; i < need.length; i += 500) {
+          const rows = need.slice(i, i + 500).map((id) => ({ student_id: id, coach_id: uid, coach_name: label, student_name: null, system_sender: who, no_reply: true }));
+          const r = await fetch(`${SB}/rest/v1/conversations`, { method: 'POST', headers: { ...svc, Prefer: 'return=representation' }, body: JSON.stringify(rows) });
+          if (r.ok) ((await r.json()) || []).forEach((c) => have.set(String(c.student_id), c.id));
+          else console.error('[mtl-announce] conv', (await r.text()).slice(0, 200));
+        }
+        const text = (head ? (head + '\n\n') : '') + txt;
+        const convIds = list.map((id) => have.get(String(id))).filter(Boolean);
+        for (let i = 0; i < convIds.length; i += 500) {
+          const rows = convIds.slice(i, i + 500).map((cid) => ({ conversation_id: cid, sender_id: uid, text }));
+          try { await sbPost('messages', rows); messages += rows.length; } catch (e) { console.error('[mtl-announce] msg', e.message); }
+        }
+      } catch (e) { console.error('[mtl-announce] messages', e.message); }
+    }
+    // ── E-MAIL ──────────────────────────────────────────────────────────────────────
+    if (as_email && RESEND_KEY) {
+      emails = 0;
+      const people = [];
+      for (let i = 0; i < list.length; i += 200) {
+        (await sbGet(`profiles?id=in.(${list.slice(i, i + 200).map(encodeURIComponent).join(',')})&select=email,lang`)).forEach((p) => { if (p.email) people.push(p); });
+      }
+      const subj = 'MTL' + (head ? (' · ' + head) : ' · Oznámení');
+      for (let i = 0; i < people.length; i += 100) {
+        const batch = people.slice(i, i + 100).map((p) => ({ from: MAIL_FROM, to: [p.email], subject: subj,
+          html: shell(head || (p.lang === 'en' ? 'Announcement from MTL' : 'Oznámení od MTL'), `<p style="font-size:14px;line-height:1.6;margin:0 0 12px;white-space:pre-line;">${esc(txt)}</p>` + button(APP_URL, p.lang === 'en' ? 'Open the app' : 'Otevřít appku'), p.lang === 'en', false) }));
+        try {
+          const r = await fetch('https://api.resend.com/emails/batch', { method: 'POST', headers: { Authorization: 'Bearer ' + RESEND_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify(batch) });
+          if (r.ok) emails += batch.length; else console.error('[mtl-announce] mail', r.status, (await r.text()).slice(0, 200));
+        } catch (e) { console.error('[mtl-announce] mail', e.message); }
+      }
+    }
+    return res.status(200).json({ ok: true, audience, sent, failed, messages, emails });
   } catch (e) {
     return res.status(500).json({ error: (e && e.message) || 'error' });
   }

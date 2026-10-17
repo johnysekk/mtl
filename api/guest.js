@@ -13,6 +13,7 @@
 // kouč je v týmu klubu, kurz patří klubu, e-mail je e-mail, a stejná věc se nezaloží dvakrát.
 import Stripe from 'stripe';
 import { checkPrice } from './_price-check.js';
+import { saleBlocked, SALE_BLOCKED_MSG, SALE_BLOCKED_MSG_EN } from './_entity-close.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
@@ -36,6 +37,7 @@ async function dropinBook(b) {
   if (!gymId || !tok || !/^[A-Za-z0-9_-]{6,80}$/.test(tok)) return [400, { error: 'Neplatný odkaz.' }];
   const g = ((await sbGet(`gyms?id=eq.${q(gymId)}&select=id,name,status,account_suspended,deleted_at`)) || [])[0];
   if (!g || g.status !== 'approved' || g.account_suspended || g.deleted_at) return [404, { error: 'Klub nenalezen.' }];
+  if (await saleBlocked({ gymId })) return [403, { error: SALE_BLOCKED_MSG }];
   // Stejný QR (token) = stejná rezervace. Druhé načtení stránky nezaloží druhou.
   const ex = ((await sbGet(`gym_bookings?gym_id=eq.${q(gymId)}&guest_token=eq.${q(tok)}&select=id,status&limit=1`)) || [])[0];
   if (ex) return ex.status === 'pending' ? [200, { id: ex.id }] : [409, { error: 'Tenhle QR kód už byl použitý. Požádej na recepci o nový.' }];

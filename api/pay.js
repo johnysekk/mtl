@@ -1,4 +1,5 @@
 import Stripe from 'stripe';
+import { saleBlocked, SALE_BLOCKED_MSG } from './_entity-close.js';
 import { resolveRate, effectiveRate, effectiveRateBreakdown, onlineRateFor, orgRate, nativePrice, nativeRate, STORE_COST, EP_TIERS, EP_TIER_ORDER, EP_TIER_NAMES, EP_YEAR_MONTHS, EP_DEFAULT_TIER, epTierKey, epTierOf, epCurrencyFor, epAmount, epRefDisc } from './_rate.js';
 import { applyEpUpgrade, notifyEpDowngradeScheduled, finishEpYearly, notifyEpMonthlyScheduled, epScheduleMonthly } from './_ep.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
@@ -153,6 +154,14 @@ export default async function handler(req, res) {
     // partner = platba Exclusive Partnera směrem k MTL; tu pozastavení blokovat nesmí,
     // jinak by se poskytovatel nedostal z dluhu ven.
     if (type !== 'partner' && type !== 'partner_change' && type !== 'supplier' && type !== 'att_disc' && !(await _assertNotSuspended(req, res))) return;
+    // POZASTAVENÝ / RUŠENÝ POSKYTOVATEL (sql/entity-close.sql) nic nového neprodává -- ani přes
+    // starý odkaz nebo otevřenou stránku. Zaplacené věci dojedou; nové platby nezačnou.
+    if (['coach', 'gym', 'membership', 'event', 'online_plan'].includes(type)) {
+      const _qq = req.query || {};
+      let _ids = { gymId: _qq.gymId || _qq.gym_id || null, coachId: _qq.coachProfileId || _qq.coachId || null, orgId: _qq.organizationId || _qq.orgId || null, eventId: _qq.eventId || null };
+      if (type === 'online_plan' && _qq.membershipId) { const _m = ((await _wsbGet(`gym_memberships?id=eq.${encodeURIComponent(_qq.membershipId)}&select=gym_id,coach_id`)) || [])[0]; if (_m) _ids = { gymId: _m.gym_id || null, coachId: _m.coach_id || null }; }
+      if (await saleBlocked(_ids)) return res.status(403).json({ error: SALE_BLOCKED_MSG });
+    }
     // POZASTAVENÝ / ZABANOVANÝ KUPUJÍCÍ (Admin → Uživatelé) nic nekupuje. Poskytovatel si dluh MTL
     // (partner, supplier) zaplatit smí.
     if (type !== 'partner' && type !== 'partner_change' && type !== 'supplier' && type !== 'att_disc') {

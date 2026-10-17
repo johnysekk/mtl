@@ -20,6 +20,7 @@
 
 import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
+import { cleanBuyer, saveBuyer, srcKey } from './_doklad-buyer.js';
 
 const ENVN = (process.env.NEONOMICS_ENV || 'sandbox').toLowerCase();
 const AUTH_BASE = 'https://' + ENVN + '.neonomics.io/auth/realms/' + ENVN + '/protocol/openid-connect/token';
@@ -277,6 +278,12 @@ async function fbxCreate(sb, req, body) {
     if (!_pc.ok) return { error: _pc.error || 'Cena neodpovídá nabídce', code: 'price_mismatch' };
   }
 
+  // NÁKUP NA FIRMU: firma vyplněná v okně výběru banky -> k řádku objednávky; doklad ji vezme
+  // při zaúčtování (record-cash). Špatně vyplněná firma platbu nezastaví -- appka ji hlídá dřív.
+  if (tbl !== 'organization_clubs' && body.buyer && typeof body.buyer === 'object') {
+    try { const _c = cleanBuyer(body.buyer); if (_c.ok) await saveBuyer(srcKey(tbl, rowId), _c.row, { user_id: (await whoFromToken(req)) || null }); }
+    catch (e) { console.error('[pis-create/buyer]', e && e.message); }
+  }
   // Závora i na serveru: checkbox v appce jde obejít, tohle ne.
   const terms = body.fbx_terms || null;
   if (!terms || !String(terms.version || '').trim() || !String(terms.text || '').trim()) {

@@ -149,10 +149,10 @@ export default async function handler(req, res) {
 
     if (b.action === 'preview' || b.action === 'end_preview') {
       return res.status(200).json({ ok: true,
-        bookings: aff.bookings.map((x) => ({ id: x.id, kind: kindOf(x), name: x.child_name || x.student_name || x.guest_name || 'Student',
+        bookings: aff.bookings.map((x) => ({ id: x.id, kind: kindOf(x), student_id: x.student_id || null, child_name: x.child_name || null, name: x.child_name || x.student_name || x.guest_name || 'Student',
           has_account: !!x.student_id, amount: x.amount, currency: x.currency || gym.currency || 'CZK', method: x.payment_method || null,
           date: x.class_date || null, time: x.class_time || null })),
-        members: aff.members.map((r) => ({ id: r.id, name: r.child_name || r.student_name || 'Člen', date: r.class_date || null, time: r.class_time || null })),
+        members: aff.members.map((r) => ({ id: r.id, student_id: r.student_id || null, child_name: r.child_name || null, name: r.child_name || r.student_name || 'Člen', date: r.class_date || null, time: r.class_time || null })),
         passes: holders.map((m) => ({ id: m.id, name: m.child_name ? `${m.child_name} (${m.student_name || ''})` : (m.student_name || 'Člen'), plan: m.plan_name || null, period_end: m.period_end || null })) });
     }
     if (b.action !== 'cancel' && b.action !== 'end') return res.status(400).json({ error: 'unknown action' });
@@ -193,6 +193,34 @@ export default async function handler(req, res) {
       if (ex[0]) await sb(`gym_class_log?id=eq.${q(ex[0].id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(row) });
       else await sb('gym_class_log', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify(row) });
       await settle(ctx, occ, aff, out);
+      // ČLENOVÉ BEZ REZERVACE, na které se termín vztahuje (permanentka / členství pokrývá lekci):
+      // appka je spočítá stejně jako docházku; server ověří, že mají u klubu běžící členství, a dá
+      // jim vědět. Zpětné „neproběhla" nikoho neobtěžuje.
+      if (ctx.mode !== 'forgot' && Array.isArray(b.covered) && b.covered.length) {
+        const had = new Set(aff.members.concat(aff.bookings).map((r) => `${r.student_id || ''}|${r.child_name || ''}`));
+        const want = [...new Map(b.covered.slice(0, 500).filter((c) => c && c.student_id).map((c) => [`${c.student_id}|${c.child_name || ''}`, c])).values()]
+          .filter((c) => !had.has(`${c.student_id}|${c.child_name || ''}`));
+        const ids = [...new Set(want.map((c) => String(c.student_id)))];
+        const live = new Set();
+        for (let i = 0; i < ids.length; i += 100) {
+          const rows = (await sb(`gym_memberships?gym_id=eq.${q(gym.id)}&student_id=in.(${ids.slice(i, i + 100).map(q).join(',')})&status=in.(active,cancelling)&select=student_id`)) || [];
+          rows.forEach((r) => live.add(String(r.student_id)));
+        }
+        const when = dCz(occ.date, occ.time), clsN = occ.name || 'lekce';
+        const rCs = ctx.note ? ` Důvod: ${ctx.note}` : '', rEn = ctx.note ? ` Reason: ${ctx.note}` : '';
+        const sent = new Set();
+        out.covered = 0;
+        for (const c of want) {
+          if (!live.has(String(c.student_id)) || sent.has(String(c.student_id))) continue;
+          sent.add(String(c.student_id));
+          const kid = c.child_name ? ` (${String(c.child_name).slice(0, 80)})` : '';
+          await notify(c.student_id,
+            `🚫 ${gym.name} zrušil lekci ${clsN} (${when})${kid}.${rCs} Na ten termín nechoď — permanentka ani členství se tím nemění.`,
+            `🚫 ${gym.name} cancelled ${clsN} (${when})${kid}.${rEn} Don't come for that class — your pass or membership is not affected.`,
+            { choice: 'covered', gym_id: gym.id, gym_name: gym.name, class_name: clsN, class_id: occ.cid || null, class_date: occ.date, class_time: occ.time || '' });
+          out.covered++;
+        }
+      }
     } else {
       // Ukončení: termíny zmizí z rozvrhu samy (appka zapíše `until` / jednorázovou smaže), takže
       // se nic nezapisuje do evidence lekcí -- jen se vyřeší přihlášení, termín po termínu.

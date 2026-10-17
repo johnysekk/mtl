@@ -112,7 +112,8 @@ export default async function handler(req, res) {
   // odkaz v biu, který ukazuje neaktivní klub, škodí klubu i MTL.
   // account_suspended patří do stejné podmínky: pozastavený klub je pro veřejnost stejně
   // neaktivní jako neschválený a odkaz v biu na něj nemá vést.
-  if (!g || (g.status && g.status !== 'approved') || g.account_suspended) {
+  // Pozastavený nebo rušený klub (sql/entity-close.sql) je pro veřejnost skrytý stejně.
+  if (!g || (g.status && g.status !== 'approved') || g.account_suspended || g.deleted_at || g.paused_at) {
     res.setHeader('Cache-Control', 'public, max-age=60');
     return res.status(404).send(
       '<!doctype html><html lang="cs"><meta charset="utf-8">'

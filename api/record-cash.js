@@ -23,6 +23,7 @@ import { approveMemberAppOnPayment, cohortPayer } from './_member-app.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 import { pragueMonth } from './_tz.js';
 import { attDiscLabel } from './_att-disc.js';
+import { buyerForSource } from './_doklad-buyer.js';
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -82,7 +83,7 @@ function _dokItemLabel(type, name, sk) {
 }
 async function _issueDokladBank({ transactionId, gymId, coachId, clubMode, customerName,
                                   customerEmail, participantName, itemLabel, amount, currency,
-                                  paymentMethod, testMode, sessionAt }) {
+                                  paymentMethod, testMode, sessionAt, buyer }) {
   try {
     if (!transactionId) return null;
     // clubMode je PARAMETR -- znovu ho deklarovat by prebilo to, co poslal volajici.
@@ -145,11 +146,15 @@ async function _issueDokladBank({ transactionId, gymId, coachId, clubMode, custo
         currency: String(currency || 'CZK').toUpperCase(),
         payment_method: paymentMethod || null, test_mode: !!testMode,
         session_at: sessionAt || null,   // termin lekce pri vystaveni; presun ho uz nezmeni
+        // NÁKUP NA FIRMU: student u objednávky vyplnil firmu -> odběratel je firma (_doklad-buyer.js).
+        ...(buyer && buyer.cust_company ? buyer : {}),
     };
     // PÁSMO DODAVATELE do snímku (datum dokladu se pak ukazuje v jeho místním čase). Kdyby
     // sloupec sup_tz v databázi ještě nebyl, zápis se zopakuje bez něj -- číslo už je vydané
     // a doklad nesmí kvůli tomu propadnout.
     const _supTz = (sup && sup.timezone) || null;
+    // Sloupce firmy (sql/doklad-buyer.sql) ještě v databázi nejsou -> doklad radši bez firmy než žádný.
+    try { if (buyer && buyer.cust_company) { const _chk = await fetch(`${SB}/rest/v1/doklady?select=cust_company&limit=1`, { headers: { apikey: KEY, Authorization: `Bearer ${KEY}` } }); if (!_chk.ok) ['cust_company', 'cust_ico', 'cust_dic', 'cust_address', 'cust_country'].forEach((k) => { delete _dkRow[k]; }); } } catch (e) {}
     try { await sb('doklady', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify(_supTz ? { ..._dkRow, sup_tz: _supTz } : _dkRow) }); }
     catch (e) { if (_supTz && /sup_tz/.test(String(e && e.message))) await sb('doklady', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify(_dkRow) }); else throw e; }
     return String(no);
@@ -616,7 +621,8 @@ export default async function handler(req, res) {
         } catch (e) {}
       }
 
-      _dokNo = await _issueDokladBank({
+      const _buyer = await buyerForSource(type, [source_booking_id, b.cohort_member_id]);
+      _dokNo = await _issueDokladBank({ buyer: _buyer,
         transactionId: _txId,
         // Klubove plneni vyplacene koucovi -> jeho payout_ identita; jinak dodavatel podle
         // toho, komu penize doopravdy prisly.

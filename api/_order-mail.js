@@ -52,12 +52,10 @@ export function withdrawalText(kind, en) {
   const C = {
     dated:  ['Jde o službu související s využitím volného času, kterou poskytovatel plní v určeném termínu. Právo na odstoupení od smlouvy do 14 dnů proto nemáš (§ 1837 písm. j) OZ). Rezervaci můžeš zrušit v appce podle storno podmínek uvedených u rezervace.',
              'This is a leisure service provided on a specific date, so the 14-day right of withdrawal does not apply (Section 1837(j) of the Czech Civil Code). You can cancel the booking in the app under the cancellation terms shown with it.'],
-    pass:   ['Od smlouvy můžeš odstoupit do 14 dnů od nákupu, a to tlačítkem „Odstoupit od smlouvy“ v appce (Moje permanentky a členství). Pokud permanentka na tvou žádost začala běžet hned, zaplatíš poměrnou část za dny, kdy běžela; zbytek ti prodávající vrátí do 14 dnů.',
+    pass:   ['Od smlouvy můžeš odstoupit do 14 dnů od nákupu, a to tlačítkem „Odstoupit od smlouvy“ v appce (Moje permanentky a členství). Pokud permanentka na tvou žádost začala běžet hned, zaplatíš poměrnou část za dny, kdy běžela; zbytek ti poskytovatel vrátí do 14 dnů.',
              'You can withdraw within 14 days of purchase with the "Withdraw from contract" button in the app (My passes & memberships). If the pass started right away at your request, you pay a proportionate part for the days it ran; the rest is refunded within 14 days.'],
-    club:   ['Ukončení členství a případné vrácení členského příspěvku se řídí stanovami spolku.',
-             'Ending the membership and any refund of the membership fee follow the association\'s statutes.'],
-    clubother: ['Zrušení a případné vrácení platby se řídí podmínkami spolku uvedenými v appce.',
-             'Cancellation and any refund follow the association\'s terms shown in the app.'],
+    club:   ['Zrušení a případné vrácení platby se řídí podmínkami poskytovatele uvedeného výše.',
+             'Cancellation and any refund of the payment follow the terms of the provider named above.'],
     online: ['Od smlouvy můžeš odstoupit do 14 dnů tlačítkem „Odstoupit od smlouvy“ v appce (Moje online objednávky). Dokud kouč službu nedodá, vrátí se ti 100 %; u balíčku se vrací poměr nedodaných kusů. Úplným dodáním služby právo na odstoupení zaniká (udělil/a jsi k tomu souhlas uvedený níže).',
              'You can withdraw within 14 days with the "Withdraw from contract" button in the app (My online orders). Until the coach delivers, you get 100 % back; for a package, the undelivered share. Once the service is fully delivered, the right of withdrawal ends (you gave the consent shown below).'],
     planbank: ['Od smlouvy můžeš odstoupit do 14 dnů od platby tlačítkem „Odstoupit od smlouvy“ v appce (Moje permanentky a členství) — zaplatíš poměrnou část za dny, kdy předplatné běželo, zbytek ti kouč vrátí převodem. Předplatné placené převodem se neobnovuje: po skončení zaplaceného období ho zaplatíš znovu.',
@@ -68,8 +66,8 @@ export function withdrawalText(kind, en) {
              'You can withdraw within 14 days of the first payment with the "Withdraw from contract" button in the app (My passes & memberships) — you pay for the days it ran, the rest is refunded. The subscription renews monthly and you can cancel any time at the end of the paid month.'],
     onsite: ['Nákup proběhl osobně v hotovosti v provozovně poskytovatele. Nejde o smlouvu uzavřenou na dálku, právo odstoupit do 14 dnů se proto nepoužije a zaplacená částka se nevrací.',
              'This purchase was paid in cash in person at the provider\'s premises. It is not a distance contract, so the 14-day right of withdrawal does not apply and the amount paid is not refunded.'],
-    goods:  ['Od kupní smlouvy můžeš odstoupit do 14 dnů od převzetí zboží; zboží vrátíš prodávajícímu a peníze dostaneš zpět do 14 dnů od odstoupení.',
-             'You can withdraw from the purchase within 14 days of receiving the goods; return them to the seller and you get your money back within 14 days.'],
+    goods:  ['Od kupní smlouvy můžeš odstoupit do 14 dnů od převzetí zboží; zboží vrátíš poskytovateli a peníze dostaneš zpět do 14 dnů od odstoupení.',
+             'You can withdraw from the purchase within 14 days of receiving the goods; return them to the provider and you get your money back within 14 days.'],
   };
   return (C[kind] || C.dated)[en ? 1 : 0];
 }
@@ -111,7 +109,7 @@ export async function sendOrderMail(txId) {
     let kind = 'dated', online = false, booking = null;
     if (type === 'coach_online') { kind = 'online'; online = true; }
     else if (type === 'coach_1to1' && /^\d+$/.test(String(tx.source_booking_id || ''))) { booking = await one(`bookings?id=eq.${q(tx.source_booking_id)}&select=type,qty,online_format`); if (booking && booking.type === 'online') { kind = 'online'; online = true; } }
-    else if (type === 'membership') kind = (!tx.gym_id && tx.coach_id) ? 'plan' : (nonprofit ? 'club' : 'pass');
+    else if (type === 'membership') kind = (!tx.gym_id && tx.coach_id) ? 'plan' : 'pass';
     else if (type === 'merch') kind = 'goods';
     if (kind === 'plan') online = true;
     const planMo = Math.max(1, parseInt(tx.months, 10) || 1);
@@ -119,9 +117,9 @@ export async function sendOrderMail(txId) {
     // Hotovost na místě (provozovna poskytovatele) = smlouva uzavřená osobně, ne na dálku: bez práva
     // na odstoupení. Appka u takové permanentky tlačítko „Odstoupit od smlouvy" neukazuje.
     if (pm === 'cash' && (kind === 'goods' || kind === 'pass')) kind = 'onsite';
-    // SPOLEK: žádné řeči o ochraně spotřebitele -- členský příspěvek ani služby spolku se tak
-    // neposuzují. Jen odkaz na stanovy / podmínky spolku.
-    if (nonprofit && kind !== 'club') kind = 'clubother';
+    // SPOLEK: žádné řeči o ochraně spotřebitele ani o odstoupení -- jedna věta pro členství
+    // i jednorázové služby: řídí se to podmínkami poskytovatele.
+    if (nonprofit) kind = 'club';
     // Obnovu předplatného (invoice.paid) vylučuje volající (renewal) -- jednorázová permanentka
     // nebo nové členství po vypršení se potvrzuje vždy znovu.
     if (!booking && kind === 'online' && tx.payment_intent) booking = await one(`bookings?payment_intent=eq.${q(tx.payment_intent)}&select=qty,online_format`);
@@ -157,7 +155,7 @@ export async function sendOrderMail(txId) {
       row(en ? 'Ordered' : 'Objednáno', esc(dt(tx.created_at, en))),
       row(en ? 'Payment' : 'Platba', esc(pm === 'qr' || pm === 'pis' ? (en ? 'bank transfer' : 'převodem') : pm === 'cash' ? (en ? 'cash' : 'hotově') : (en ? 'card' : 'kartou'))),
       dok && dok.doklad_no ? row(en ? 'Receipt no.' : 'Číslo dokladu', esc(dok.doklad_no)) : '',
-      `<tr><td colspan="2" style="padding:14px 0 2px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#999;">${nonprofit ? (en ? 'Provider' : 'Poskytovatel') : (en ? 'Seller' : 'Prodávající')}</td></tr>`,
+      `<tr><td colspan="2" style="padding:14px 0 2px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#999;">${en ? 'Service provider' : 'Poskytovatel služby'}</td></tr>`,
       row(en ? 'Legal name' : 'Právní název', esc(sName || '—')),
       sIco ? row(en ? 'Reg. no.' : 'IČO', esc(sIco)) : '',
       sAddr ? row(en ? 'Registered address' : 'Sídlo', esc(sAddr)) : '',
@@ -165,9 +163,7 @@ export async function sendOrderMail(txId) {
     ].join('');
     const body = `<p style="font-size:14px;line-height:1.5;margin:0 0 12px;">${en ? `Hi ${esc(who.name || '')}, this confirms your order.` : `Ahoj ${esc(who.name || '')}, potvrzujeme tvou objednávku.`}</p>
       <table style="width:100%;border-collapse:collapse;">${rows}</table>
-      <p style="font-size:12.5px;color:#555;line-height:1.5;margin:12px 0;">${nonprofit
-        ? (en ? 'The provider is the association named above. Martial Training Lab only mediates the payment.' : 'Poskytovatelem je výše uvedený spolek. Martial Training Lab platbu jen zprostředkovává.')
-        : (en ? 'The seller is the provider named above, a business. Martial Training Lab only mediates the order and payment.' : 'Prodávajícím je výše uvedený poskytovatel jako podnikatel. Martial Training Lab objednávku a platbu jen zprostředkovává.')}</p>
+      <p style="font-size:12.5px;color:#555;line-height:1.5;margin:12px 0;">${en ? 'The service provider is named above. MTL only mediates the payment.' : 'Poskytovatel služby je uveden výše. MTL platbu jen zprostředkovává.'}</p>
       <div style="background:#f5f2ee;border-radius:10px;padding:12px 14px;font-size:13px;line-height:1.55;margin:12px 0;"><b>${nonprofit ? (en ? 'Cancellation and refunds' : 'Zrušení a vrácení') : (en ? 'Right of withdrawal' : 'Odstoupení od smlouvy')}</b><br>${esc(withdrawalText(wdKind || kind, en))}</div>
       ${consentText ? `<div style="border:1px solid #eee;border-radius:10px;padding:12px 14px;font-size:12.5px;line-height:1.55;margin:12px 0;"><b>${en ? 'Your consent' : 'Tvůj souhlas'}</b> (${esc(dt(consent.accepted_at, en))})<br>„${esc(consentText)}“</div>` : ''}
       <p style="margin:16px 0 0;"><a href="${APP_URL}" style="display:inline-block;background:#141414;color:#fff;text-decoration:none;padding:11px 16px;border-radius:10px;font-weight:700;font-size:14px;">${en ? 'Open the app' : 'Otevřít appku'}</a></p>`;
@@ -189,10 +185,10 @@ export async function sendWithdrawalMail({ userId, provider, label, statement, a
     const en = String(who.lang || '') === 'en';
     const rows = [
       row(en ? 'Contract' : 'Smlouva', esc(label || '')),
-      row(en ? 'Seller' : 'Prodávající', esc(provider || '')),
+      row(en ? 'Service provider' : 'Poskytovatel služby', esc(provider || '')),
       row(en ? 'Withdrawal sent' : 'Odstoupení odesláno', esc(dt(at || new Date().toISOString(), en))),
       Number(keepMinor) > 0 ? row(en ? 'Kept for the part provided' : 'Ponecháno za poskytnutou část', esc(money(keepMinor, currency, en))) : '',
-      row(en ? 'Refund' : 'Vrací se', esc(money(refundMinor, currency, en)) + `<div style="font-weight:400;color:#666;font-size:12px;">${pending ? (en ? 'by bank transfer from the seller within 14 days' : 'převodem od prodávajícího do 14 dnů') : (method === 'card' ? (en ? 'to your card' : 'na kartu') : '')}</div>`),
+      row(en ? 'Refund' : 'Vrací se', esc(money(refundMinor, currency, en)) + `<div style="font-weight:400;color:#666;font-size:12px;">${pending ? (en ? 'by bank transfer from the provider within 14 days' : 'převodem od poskytovatele do 14 dnů') : (method === 'card' ? (en ? 'to your card' : 'na kartu') : '')}</div>`),
     ].join('');
     const body = `<p style="font-size:14px;line-height:1.5;margin:0 0 12px;">${en ? 'We have received your withdrawal from the contract.' : 'Potvrzujeme přijetí tvého odstoupení od smlouvy.'}</p>
       <table style="width:100%;border-collapse:collapse;">${rows}</table>

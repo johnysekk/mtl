@@ -6,6 +6,7 @@
 import Stripe from 'stripe';
 import { resolveRate } from './_rate.js';
 import { ensurePmDomain } from './_pm-domain.js';
+import { saleBlocked, SALE_BLOCKED_MSG, SALE_BLOCKED_MSG_EN } from './_entity-close.js';
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const _SUPA = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const _KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -351,6 +352,8 @@ export default async function handler(req, res) {
     const rows = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohortId)}&select=*`);
     const c = rows && rows[0];
     if (!c) return res.status(404).json({ ok: false, error: 'cohort not found' });
+    // Nová přihláška u pozastaveného / rušeného klubu nevznikne (běžící kurz platby dál přijímá).
+    if (await saleBlocked({ gymId: c.gym_id || null, coachId: c.gym_id ? null : (c.owner_id || null) })) return res.status(403).json({ ok: false, error: SALE_BLOCKED_MSG });
 
     // The client picks an OFFER by name; normalise it against what the cohort actually offers so a
     // tampered request can't invent a cheaper one. Unknown name -> the first (standard) offer.

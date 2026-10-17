@@ -13,6 +13,8 @@
 //   ->  { ok, ticket_id, order_id, ids, total, currency, free }
 // Přihlášený (Bearer token): jméno a e-mail z jeho profilu, lístky na jeho účet.
 
+import { saleBlocked, SALE_BLOCKED_MSG, SALE_BLOCKED_MSG_EN } from './_entity-close.js';
+
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const q = encodeURIComponent;
@@ -92,6 +94,7 @@ export default async function handler(req, res) {
     const ev = ((await sb(`events?id=eq.${q(String(b.event_id || ''))}&select=id,gym_id,status,starts_at,capacity,capacity_full,ticket_price,ticket_tiers,currency,terms_text,min_age`)) || [])[0];
     if (!ev) return res.status(404).json({ ok: false, error: 'not found' });
     if (ev.status !== 'approved') return res.status(403).json({ ok: false, error: EN ? 'Sales are closed' : 'Prodej je uzavřený', closed: true });
+    if (await saleBlocked({ eventId: ev.id })) return res.status(403).json({ ok: false, error: EN ? SALE_BLOCKED_MSG_EN : SALE_BLOCKED_MSG, closed: true });
     if (ev.starts_at && Date.now() > new Date(ev.starts_at).getTime()) return res.status(403).json({ ok: false, error: EN ? 'The event has started' : 'Akce už začala', closed: true });
 
     // Košík: CENA ZE SERVERU, z ceníku akce. Klient posílá jen variantu a počet.
