@@ -1,5 +1,7 @@
 // /api/admin-suspend — RUČNÍ POZASTAVENÍ POSKYTOVATELE Z ADMINU (jen founder).
-// POST { action:'suspend'|'restore', kind:'gym'|'coach'|'org', id, reason, howto }
+// POST { action:'suspend'|'restore', kind:'gym'|'coach'|'org', id, reason, howto, dsa?: { illegal, redress } }
+// dsa: MTL zjistilo nezákonnou nabídku -> informuje kupující za posledních 6 měsíců (DSA čl. 32,
+// _dsa-inform.js).
 //
 // Pozastavení = account_suspended (stejný příznak jako u neuhrazené provize: zmizí z decku
 // a z hledání, nové rezervace, členství, lístky ani hotovost nejdou; už běžící předplatné kartou
@@ -7,6 +9,7 @@
 // nezrušila. Důvod je povinný, „Jak pozastavení zrušit" nepovinné. Poskytovateli přijde
 // notifikace v appce (proklik na vysvětlení) a e-mail -- koho, proč a jak se z toho dostat.
 import { providerTarget, providerNotify, providerMail, sbWrite, esc, APP, FOUNDER_UUID } from './_provider-mail.js';
+import { dsaInformBuyers } from './_dsa-inform.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -40,6 +43,8 @@ export default async function handler(req, res) {
       const reason = String(b.reason || '').trim().slice(0, 600);
       const howto = String(b.howto || '').trim().slice(0, 1200);
       if (!reason) return res.status(400).json({ error: 'Důvod pozastavení je povinný.' });
+      const dsa = b.dsa && String(b.dsa.illegal || '').trim() ? { illegal: String(b.dsa.illegal).trim().slice(0, 1500), redress: String(b.dsa.redress || '').trim().slice(0, 1500) } : null;
+      if (dsa && !dsa.redress) return res.status(400).json({ error: 'U upozornění kupujícím vyplň i to, co můžou dělat (prostředky nápravy).' });
       const patch = { account_suspended: true, suspend_manual: true, suspend_reason: reason, suspend_howto: howto || null, suspended_at: now.toISOString() };
       // Dodavatel se v seznamu Dodavatelů řídí stavem 'approved' -- pozastavený se tam nesmí ukázat.
       if (kind === 'org' && T.orgKind === 'supplier') patch.status = 'suspended';
@@ -65,7 +70,9 @@ export default async function handler(req, res) {
              howto ? `<b>Jak pozastavení zrušit:</b> ${esc(howto)}` : 'Pro zrušení pozastavení odpověz na tento e-mail nebo nás kontaktuj.',
              '<b>Co to znamená:</b> v appce není vidět a nejde u něj nic nového rezervovat ani koupit. Už běžící předplatné kartou běží dál a data, rozvrh i členové zůstávají beze změny.'],
         { text: en ? 'Open in the app' : 'Otevřít v appce', url: link });
-      return res.status(200).json({ ok: true });
+      let dsaOut = null;
+      if (dsa) { try { dsaOut = await dsaInformBuyers({ kind, id, name: T.name, illegal: dsa.illegal, redress: dsa.redress, by: FOUNDER_UUID }); } catch (e) { dsaOut = { error: e.message }; } }
+      return res.status(200).json({ ok: true, dsa: dsaOut });
     }
 
     // OBNOVENÍ. Když je u účtu zároveň neuhrazená provize po lhůtě, commission-cron ho při dalším
