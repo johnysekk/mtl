@@ -1,7 +1,7 @@
 import Stripe from 'stripe';
 import { saleBlocked, SALE_BLOCKED_MSG } from './_entity-close.js';
 import { resolveRate, effectiveRate, effectiveRateBreakdown, onlineRateFor, orgRate, nativePrice, nativeRate, STORE_COST, EP_TIERS, EP_TIER_ORDER, EP_TIER_NAMES, EP_YEAR_MONTHS, EP_DEFAULT_TIER, epTierKey, epTierOf, epCurrencyFor, epAmount, epRefDisc } from './_rate.js';
-import { applyEpUpgrade, notifyEpDowngradeScheduled, finishEpYearly, notifyEpMonthlyScheduled, epScheduleMonthly, epEnsureProduct } from './_ep.js';
+import { applyEpUpgrade, notifyEpDowngradeScheduled, finishEpYearly, notifyEpMonthlyScheduled, epScheduleMonthly, epEnsureProduct, epProductId } from './_ep.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 import { checkPrice, offerPrices, planTermPrices, checkOnlineCountry } from './_price-check.js';
 import { vatMode } from './_vat.js';
@@ -1053,7 +1053,7 @@ async function partnerCheckout(req, res) {
     client_reference_id: userId,
     ...(user.email ? { customer_email: user.email } : {}),
     line_items: [
-      { price_data: { currency: price.currency, product_data: { name: 'Exclusive MTL Partner' }, unit_amount: Math.round(_epAmount*100), recurring: { interval: _epInterval } }, quantity: 1 },
+      { price_data: Object.assign({ currency: price.currency, unit_amount: Math.round(_epAmount*100), recurring: { interval: _epInterval } }, await (async () => { try { return { product: await epProductId() }; } catch (e) { return { product_data: { name: 'Exclusive MTL Partner' } }; } })()), quantity: 1 },
     ],
     subscription_data: { metadata: md },
     metadata: md,

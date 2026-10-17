@@ -118,7 +118,7 @@ async function photonPlaces(q, o) {
     const t = String(pr.type || '').toLowerCase();
     const isCity = t === 'city';
     const address = { suburb: isCity ? (pr.district || undefined) : pr.name, city: isCity ? pr.name : (pr.city || pr.county || undefined),
-      state: pr.state || undefined, county: pr.county || undefined, country: pr.country || undefined,
+      state: pr.state || undefined, county: pr.county || undefined, country: pr.country || undefined, postcode: pr.postcode || undefined,
       country_code: String(pr.countrycode || '').toLowerCase() || undefined };
     const ex = pr.extent;
     return { display_name: [pr.name, isCity ? null : pr.city, pr.state, pr.country].filter(Boolean).join(', '), lat: String(c[1]), lon: String(c[0]),

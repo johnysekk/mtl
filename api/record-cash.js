@@ -24,6 +24,7 @@ import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 import { pragueMonth } from './_tz.js';
 import { attDiscLabel } from './_att-disc.js';
 import { buyerForSource } from './_doklad-buyer.js';
+import { mfaRequired } from './_mfa.js';
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -332,6 +333,7 @@ export default async function handler(req, res) {
       const ur = await fetch(`${SB}/auth/v1/user`, { headers: { apikey: KEY, Authorization: `Bearer ${token}` } });
       if (!ur.ok) return res.status(401).json({ error: 'bad token' });
       const u = await ur.json(); uid = u && u.id;
+      if (mfaRequired(token, u)) return res.status(401).json({ error: 'mfa_required' });
       try { const _pr = await _wsbGet(`profiles?id=eq.${uid}&select=name`); _recName = (_pr && _pr[0] && _pr[0].name) || null; } catch (e) {}
       if (!uid) return res.status(401).json({ error: 'no user' });
     }

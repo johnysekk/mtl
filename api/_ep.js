@@ -188,6 +188,23 @@ const _rec = (r) => ({ interval: r.interval, interval_count: r.interval_count ||
 // PRODUKT PŘEDPLATNÉHO MUSÍ BÝT AKTIVNÍ. První platba ho založí přes price_data.product_data a
 // Stripe takový produkt vede jako neaktivní: novou cenu na něm vytvoří, ale předplatné na ni
 // nepřevede („The product … is marked as inactive"). Proto se před každou změnou ceny zapne.
+// STÁLÝ PRODUKT „Exclusive MTL Partner" pro nová předplatná (místo produktu založeného v Checkoutu
+// přes product_data, který Stripe vede jako neaktivní). Bere STRIPE_EP_PRODUCT, jinak ho najde
+// podle metadat mtl_kind=ep, jinak ho jednou založí.
+let _epProd = null;
+export async function epProductId() {
+  if (_epProd) return _epProd;
+  const envId = String(process.env.STRIPE_EP_PRODUCT || '').trim();
+  if (envId) { _epProd = await epEnsureProduct(envId); return _epProd; }
+  try {
+    const r = await stripe.products.search({ query: "metadata['mtl_kind']:'ep'", limit: 1 });
+    const hit = r && r.data && r.data[0];
+    if (hit) { _epProd = await epEnsureProduct(hit.id); return _epProd; }
+  } catch (e) { console.error('[ep] product search', e.message); }
+  const p = await stripe.products.create({ name: 'Exclusive MTL Partner', metadata: { mtl_kind: 'ep' } });
+  _epProd = p.id;
+  return _epProd;
+}
 export async function epEnsureProduct(product) {
   try {
     const pr = await stripe.products.retrieve(product);

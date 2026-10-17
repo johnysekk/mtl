@@ -12,6 +12,14 @@
 // NOTE: Tap to Pay works ONLY through the native Terminal SDK. The PWA cannot
 // call this to any effect — it exists so the native build can drop straight in.
 
+// 2FA: účet se zapnutým dvoufázovým ověřením smí volat API jen s tokenem po zadání kódu (aal2).
+function mfaRequired(token, user) {
+  const has = Array.isArray(user && user.factors) && user.factors.some((f) => f && f.status === 'verified');
+  if (!has) return false;
+  try { const p = String(token || '').split('.')[1] || ''; const c = JSON.parse(Buffer.from(p.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')); return c.aal !== 'aal2'; }
+  catch (e) { return true; }
+}
+
 const Stripe = require('stripe');
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -40,6 +48,7 @@ module.exports = async (req, res) => {
     const ur = await fetch(`${SB}/auth/v1/user`, { headers: { apikey: KEY, Authorization: `Bearer ${token}` } });
     if (!ur.ok) return res.status(401).json({ error: 'bad token' });
     const u = await ur.json(); const uid = u && u.id;
+    if (mfaRequired(token, u)) return res.status(401).json({ error: 'mfa_required' });
     if (!uid) return res.status(401).json({ error: 'bad token' });
 
     // --- verify the caller owns the gym + get its connected account ---

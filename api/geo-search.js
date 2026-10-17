@@ -13,7 +13,7 @@
 // kind=place: jen obce, městské části a čtvrti (výběr města / místa v poptávce).
 // kind=postal: PSČ / ZIP v zemi cc → [{ lat, lng, postal, city, state, cc, precision:'postcode' }] (USA místo městských částí).
 // Kdo odpovídá (OpenStreetMap, LocationIQ, Mapbox, Google), určuje _geo-provider.js.
-import { geoSearch, geoPostal, providerName } from './_geo-provider.js';
+import { geoSearch, geoPostal, providerName, haversineKm } from './_geo-provider.js';
 
 // Paměť procesu. Vercel funkce žijí krátce, takže je to malá, ale účinná pojistka proti
 // opakovaným dotazům při psaní. Bez limitu by tu při dlouhém běhu narůstal objem.
@@ -51,6 +51,38 @@ export default async function handler(req, res) {
   const kind = ['place', 'city'].includes(req.query && req.query.kind) ? req.query.kind : null;
   const nlat = parseFloat(req.query && req.query.lat), nlng = parseFloat(req.query && req.query.lon);
   const near = (isFinite(nlat) && isFinite(nlng)) ? { lat: nlat, lng: nlng } : null;
+
+  // kind=part: ČÁST MĚSTA podle názvu, s PSČ (výběr místa po výběru města). Jen části obcí do
+  // 25 km od středu vybraného města (lat/lon), seřazené podle shody. → [{ name, postcode, lat, lng }]
+  if (req.query && req.query.kind === 'part') {
+    if (q.length < 2 || !near) { res.setHeader('Cache-Control', 'no-store'); return res.status(200).json([]); }
+    const pkey = 'part|' + providerName() + '|' + cc + '|' + Math.round(near.lat * 100) + ',' + Math.round(near.lng * 100) + '|' + q.toLowerCase();
+    const ph = cacheGet(pkey);
+    if (ph) { res.setHeader('Cache-Control', 'public, max-age=3600'); return res.status(200).json(ph); }
+    try {
+      const rows = await geoSearch(q, { cc, lang, limit: 12, kind: 'place', near });
+      const seen = {};
+      const out = [];
+      for (const x of rows) {
+        if (x.precision !== 'district') continue;
+        const la = parseFloat(x.lat), lo = parseFloat(x.lon);
+        if (!isFinite(la) || !isFinite(lo) || haversineKm(near.lat, near.lng, la, lo) > 25) continue;
+        const a = x.address || {};
+        const name = String(a.suburb || a.city_district || a.quarter || a.neighbourhood || String(x.display_name || '').split(',')[0] || '').trim();
+        if (!name) continue;
+        const k = name.toLowerCase(); if (seen[k]) continue; seen[k] = 1;
+        out.push({ name, postcode: a.postcode ? String(a.postcode) : null, lat: la, lng: lo });
+        if (out.length >= 8) break;
+      }
+      cacheSet(pkey, out);
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      return res.status(200).json(out);
+    } catch (e) {
+      console.error('[geo-search part]', providerName(), (e && e.status) || '', (e && e.message) || e);
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(502).json({ error: 'geocoder_unavailable' });
+    }
+  }
 
   if (req.query && req.query.kind === 'postal') {
     const pkey = 'postal|' + providerName() + '|' + cc + '|' + q.toUpperCase();

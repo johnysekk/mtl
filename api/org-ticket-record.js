@@ -17,6 +17,7 @@ import { isTestMode } from './_config.js';
 import { vatMode, vatRateFor } from './_vat.js';
 import { pragueMonth } from './_tz.js';
 import { buyerForSource } from './_doklad-buyer.js';
+import { mfaRequired } from './_mfa.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -132,6 +133,7 @@ export default async function handler(req, res) {
         const ur = await fetch(`${SB}/auth/v1/user`, { headers: { apikey: KEY, Authorization: `Bearer ${b.token}` } });
         if (!ur.ok) return res.status(401).json({ error: 'bad token' });
         const u = await ur.json();
+        if (mfaRequired(b.token, u)) return res.status(401).json({ error: 'mfa_required' });
         const _o = (await sb(`organizations?id=eq.${encodeURIComponent(organization_id)}&select=owner_id`))[0];
         _byOwner = !!(u && u.id && _o && String(_o.owner_id) === String(u.id));
       } catch (e) { _byOwner = false; }

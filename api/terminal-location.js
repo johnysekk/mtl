@@ -10,6 +10,14 @@
 // Stores the id on gyms.terminal_location_id (run terminal-location.sql once).
 // Env: STRIPE_SECRET_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
 
+// 2FA: účet se zapnutým dvoufázovým ověřením smí volat API jen s tokenem po zadání kódu (aal2).
+function mfaRequired(token, user) {
+  const has = Array.isArray(user && user.factors) && user.factors.some((f) => f && f.status === 'verified');
+  if (!has) return false;
+  try { const p = String(token || '').split('.')[1] || ''; const c = JSON.parse(Buffer.from(p.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')); return c.aal !== 'aal2'; }
+  catch (e) { return true; }
+}
+
 const Stripe = require('stripe');
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -38,6 +46,7 @@ module.exports = async (req, res) => {
     const ur = await fetch(`${SB}/auth/v1/user`, { headers: { apikey: KEY, Authorization: `Bearer ${token}` } });
     if (!ur.ok) return res.status(401).json({ error: 'bad token' });
     const u = await ur.json(); const uid = u && u.id;
+    if (mfaRequired(token, u)) return res.status(401).json({ error: 'mfa_required' });
     if (!uid) return res.status(401).json({ error: 'bad token' });
 
     const gyms = await sb(`gyms?id=eq.${gym_id}&select=id,owner_id,name,address,city,country,stripe_account,terminal_location_id`);

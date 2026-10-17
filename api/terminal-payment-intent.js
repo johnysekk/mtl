@@ -26,12 +26,20 @@
 //     A card_present PI fires payment_intent.succeeded + charge.succeeded — make sure
 //     one of those paths writes the row (idempotently) using this metadata.
 
+// 2FA: účet se zapnutým dvoufázovým ověřením smí volat API jen s tokenem po zadání kódu (aal2).
+function mfaRequired(token, user) {
+  const has = Array.isArray(user && user.factors) && user.factors.some((f) => f && f.status === 'verified');
+  if (!has) return false;
+  try { const p = String(token || '').split('.')[1] || ''; const c = JSON.parse(Buffer.from(p.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')); return c.aal !== 'aal2'; }
+  catch (e) { return true; }
+}
+
 const Stripe = require('stripe');
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const { ladderRate: _mtlLadder } = require('./_rate.js');
+const { ladderRate: _mtlLadder, epTierOf: _epTierOf, hasOrgRate: _hasOrgRate } = require('./_rate.js');
 
 async function sb(path, opts = {}) {
   const r = await fetch(`${SB}/rest/v1/${path}`, {
@@ -51,7 +59,7 @@ async function sb(path, opts = {}) {
 // in-person card payment. Must match _ladderRate('stripe', ...).
 function ladderRate(profile) {
   if (!profile) return 0.03;                                   // Stripe base 3%
-  return _mtlLadder('stripe', { partner: profile.partner, founding: profile.founding, score: profile.coach_ref_score, bankai: profile.bankai_eligible });
+  return _mtlLadder('stripe', { partner: _epTierOf(profile), founding: profile.founding, score: profile.coach_ref_score, bankai: profile.bankai_eligible, org: _hasOrgRate(profile) });
 }
 
 module.exports = async (req, res) => {
@@ -66,6 +74,7 @@ module.exports = async (req, res) => {
     const ur = await fetch(`${SB}/auth/v1/user`, { headers: { apikey: KEY, Authorization: `Bearer ${token}` } });
     if (!ur.ok) return res.status(401).json({ error: 'bad token' });
     const u = await ur.json(); const uid = u && u.id;
+    if (mfaRequired(token, u)) return res.status(401).json({ error: 'mfa_required' });
     if (!uid) return res.status(401).json({ error: 'bad token' });
 
     // --- verify gym ownership + get connected account + owner rate ---
@@ -76,7 +85,7 @@ module.exports = async (req, res) => {
     if (gym.account_suspended) return res.status(403).json({ error: 'account suspended' });
     if (!gym.stripe_account) return res.status(400).json({ error: 'gym has no Stripe connected account' });
 
-    const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,founding,coach_ref_score,bankai_eligible`);
+    const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,partner_tier,founding,coach_ref_score,bankai_eligible,org_rate_until`);
     const rate = ladderRate((owners && owners[0]) || null);
     const applicationFee = Math.round(amount * rate); // amount is already minor units
 
@@ -88,7 +97,7 @@ module.exports = async (req, res) => {
       currency: cur,
       payment_method_types: ['card_present'],
       capture_method: 'automatic',
-      application_fee_amount: applicationFee,
+      ...(applicationFee > 0 ? { application_fee_amount: applicationFee } : {}),   // Kage: 0 % provize
       metadata: {
         mtl_payment_type: type,            // drop_in / membership / merch / ...
         mtl_plan: class_name || 'Drop-in',
