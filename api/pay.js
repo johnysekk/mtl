@@ -1138,7 +1138,25 @@ async function partnerChange(req, res) {
       const pr = await epPriceFor(t, prof, subCur);
       out.push({ tier: t, month: pr.amount, founding: pr.founding, due: Math.max(0, Math.round((amountOf(pr.amount) - prevUnit) * frac)) / 100 });
     }
-    return res.status(200).json({ ok: true, tier: cur, currency: subCur, upgrades: out,
+    // CO SE UKÁŽE PŘED PLATBOU: z jaké karty se strhne a na koho půjde faktura. Bez toho
+    // „Přejít hned" rovnou strhlo peníze a člověk neměl jak zkontrolovat kartu ani odběratele.
+    let card = null, bill = null;
+    try {
+      const sx = await stripe.subscriptions.retrieve(sub.id, { expand: ['default_payment_method', 'customer.invoice_settings.default_payment_method'] });
+      const pm = sx.default_payment_method || (sx.customer && sx.customer.invoice_settings && sx.customer.invoice_settings.default_payment_method) || null;
+      const c = pm && pm.card;
+      if (c) card = { brand: c.brand || '', last4: c.last4 || '', exp: (c.exp_month && c.exp_year) ? (String(c.exp_month).padStart(2, '0') + '/' + String(c.exp_year).slice(-2)) : '' };
+    } catch (e) { console.error('[ep] card', e.message); }
+    try {
+      const gid = String((sub.metadata || {}).ep_bill_gym || '');
+      const cols = 'name,legal_name,tax_id,vat_id,billing_line1,billing_line2,billing_city,billing_postal,billing_country';
+      let r = null, kind = 'profile';
+      if (gid) { r = (await _wsbGet(`gyms?id=eq.${encodeURIComponent(gid)}&owner_id=eq.${encodeURIComponent(uid)}&select=id,${cols}`))[0] || null; if (r) kind = 'gym'; }
+      if (!r) r = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(uid)}&select=${cols}`))[0] || null;
+      if (r) bill = { kind, gym_id: kind === 'gym' ? r.id : null, name: r.legal_name || r.name || '', ico: r.tax_id || '', dic: r.vat_id || '',
+        address: [r.billing_line1, r.billing_line2, [r.billing_postal, r.billing_city].filter(Boolean).join(' '), r.billing_country].filter(Boolean).join(', ') };
+    } catch (e) { console.error('[ep] bill', e.message); }
+    return res.status(200).json({ ok: true, tier: cur, currency: subCur, upgrades: out, card, bill,
       interval: yearly ? 'year' : 'month', interval_next: pendingMonthly ? 'month' : null, period_end: peIso,
       ...(yearly ? { month_amount: monthUnit / 100 }
         : { year_amount: yearUnit / 100, year_due: Math.max(0, yearUnit - Math.round(item.price.unit_amount * frac)) / 100 }) });
