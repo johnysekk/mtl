@@ -254,7 +254,7 @@ export function mtlModel(dk, lang, opts) {
     m.title = isSup ? T.tSup : T.tEp;
     // Období od–do; Stripe dává konec jako začátek dalšího období, proto o den méně.
     const per = subPeriod(dk, lang);
-    m.facts = [[T.invNo, docNo(dk)], [T.issued, D(dk.issued_at || dk.charged_at)], [T.subPeriod, per], [T.duzp, duzp], [T.method, m.status.paid ? T.card : '']];
+    m.facts = twoCols([[T.invNo, docNo(dk)], [T.subPeriod, per], [T.method, m.status.paid ? T.card : '']], [[T.duzp, duzp], [T.issued, D(dk.issued_at || dk.charged_at)]]);
     // Položka podle snímku (česky label, anglicky label_en -- má ho doklad od stupňů EP); starší
     // doklady bez anglického názvu: druh + měsíc.
     const label = en ? (li.label_en || ((isSup ? T.iSup : T.iEp) + ' ' + String(dk.period_month || ''))) : (li.label || ((isSup ? T.iSup : T.iEp) + ' ' + String(dk.period_month || '')));
@@ -262,7 +262,7 @@ export function mtlModel(dk, lang, opts) {
   } else {
     m.title = T.tCommission;
     const kind = dk.organization_id ? T.kOrg : (dk.gym_id ? T.kGym : (dk.billing_identity === 'payout' ? T.kCoachPayout : T.kCoach));
-    m.facts = [[T.invNo, docNo(dk)], [T.issued, D(dk.charged_at)], [T.period, periodLabel(dk.period_month, lang)], [T.duzp, duzp], [T.billedAs, kind]];
+    m.facts = twoCols([[T.invNo, docNo(dk)], [T.period, periodLabel(dk.period_month, lang)], [T.billedAs, kind]], [[T.duzp, duzp], [T.issued, D(dk.charged_at)]]);
     // Řádek obchodu s aplikacemi (online koučink z nativní appky) není provize MTL -- poplatek Apple / Google.
     const lbl = (i) => i.store ? (T.storeFee + ((i.method && i.method !== 'stripe') ? (' · ' + _method(i.method, lang)) : ''))
                                : (_method(i.method, lang) + (i.acq ? (' · ' + T.acq) : ''));
@@ -276,6 +276,19 @@ export function mtlModel(dk, lang, opts) {
   if (vatShow) m.sums = vatLines(); else m.vatNote = vatNote();
   m.total = [T.total, M(dk.amount)];
   return m;
+}
+
+// ÚDAJE VE DVOU SLOUPCÍCH: levý (číslo, období, úhrada…) a pravý (datum uskutečnění plnění NAD
+// datem vystavení -- u provize je plnění poslední den měsíce a doklad se vystavuje až potom).
+// Vykresluje se po řádcích (levý, pravý), proto se sloupce prokládají; prázdné se vynechají
+// a kratší sloupec se doplní prázdnou buňkou, ať se nic neposune do druhého sloupce.
+function twoCols(L, R) {
+  const PAD = ['\u00a0', '\u00a0'];
+  L = (L || []).filter((f) => f && f[1]); R = (R || []).filter((f) => f && f[1]);
+  const out = [];
+  for (let i = 0; i < Math.max(L.length, R.length); i++) { out.push(L[i] || PAD); if (R[i] || i < L.length - 1 || R.length > i) out.push(R[i] || PAD); }
+  while (out.length && out[out.length - 1] === PAD) out.pop();
+  return out;
 }
 
 // ── MODEL: DOKLAD STUDENTOVI OD KLUBU / KOUČE (doklady) ──────────────────────────────────────
@@ -303,11 +316,12 @@ export function studentModel(dk, lang, opts) {
   // Termín lekce, ne datum plnění: platba předem = plnění dnem platby; termín se přesunem mění.
   const sess = String(dk.session_at || '').trim(), sDate = sess.slice(0, 10), sTime = sess.slice(11).trim();
   const ref = (dk.payment_intent && !String(dk.payment_intent).startsWith('pis')) ? String(dk.payment_intent) : '';
-  m.facts = [[T.docNo, dk.doklad_no || ''], [T.issued, D(dk.issued_at)],
-    // Datum uskutečnění plnění jen u plátce DPH (povinný údaj daňového dokladu).
-    [T.duzp, (dk.duzp && isPayer) ? fmtDate(String(dk.duzp).slice(0, 10), lang) : ''],
+  // Datum uskutečnění plnění jen u plátce DPH (povinný údaj daňového dokladu). Platí se předem,
+  // takže plnění = den přijetí platby; starší doklad bez zapsaného DUZP ho má podle data vystavení.
+  const duzpS = isPayer ? (dk.duzp ? fmtDate(String(dk.duzp).slice(0, 10), lang) : D(dk.issued_at)) : '';
+  m.facts = twoCols([[T.docNo, dk.doklad_no || ''],
     [T.session, sDate ? ((fmtDate(sDate, lang) || sDate) + (sTime ? (' ' + sTime) : '')) : ''],
-    [T.payRef, ref]].filter((f) => f[1]);
+    [T.payRef, ref]], [[T.duzp, duzpS], [T.issued, D(dk.issued_at)]]);
   let item = String(dk.item_label || '').trim() || T.payment;
   if (en) item = itemLabelEn(item);
   m.table = { cols: [{ t: T.item, w: 4 }, { t: T.amount, a: 'r', w: 1.4 }], rows: [[item, money(dk.amount, cur, lang)]] };
