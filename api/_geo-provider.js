@@ -291,12 +291,19 @@ export async function geoPostal(postal, o = {}) {
   } else {
     const key = pr === 'locationiq' ? process.env.LOCATIONIQ_KEY : null;
     const base = key ? 'https://us1.locationiq.com/v1' : 'https://nominatim.openstreetmap.org';
-    const p = new URLSearchParams({ format: 'json', addressdetails: '1', limit: '1', postalcode: pc, countrycodes: cc });
-    if (key) p.set('key', key); else await nomThrottle();
-    const r = await fetch(`${base}/search?${clean(p)}`, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
-    if (!r.ok) { const e = new Error('geocoder_unavailable'); e.status = r.status; throw e; }
-    const d = await r.json();
-    rows = (Array.isArray(d) ? d : []).map((x) => ({ display_name: x.display_name, lat: x.lat, lon: x.lon, address: x.address || {} }));
+    // Zápis PSČ se v mapách liší („602 00" / „60200"): zkusí se, jak ho člověk napsal, bez mezer
+    // a u pěti číslic i ve tvaru 3+2 (CZ, SK, SE, GR).
+    const flat = pc.replace(/[\s-]/g, '');
+    const tries = [...new Set([pc, flat, /^\d{5}$/.test(flat) ? flat.slice(0, 3) + ' ' + flat.slice(3) : pc])];
+    for (const t of tries) {
+      const p = new URLSearchParams({ format: 'json', addressdetails: '1', limit: '1', postalcode: t, countrycodes: cc });
+      if (key) p.set('key', key); else await nomThrottle();
+      const r = await fetch(`${base}/search?${clean(p)}`, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
+      if (!r.ok) { if (r.status === 404) continue; const e = new Error('geocoder_unavailable'); e.status = r.status; throw e; }
+      const d = await r.json();
+      rows = (Array.isArray(d) ? d : []).map((x) => ({ display_name: x.display_name, lat: x.lat, lon: x.lon, address: x.address || {} }));
+      if (rows.length) break;
+    }
   }
   const x = rows.find((r) => _ccOk(r, cc) && isFinite(parseFloat(r.lat)) && isFinite(parseFloat(r.lon)));
   if (!x) return null;

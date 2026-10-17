@@ -1,7 +1,7 @@
 import Stripe from 'stripe';
 import { saleBlocked, SALE_BLOCKED_MSG } from './_entity-close.js';
 import { resolveRate, effectiveRate, effectiveRateBreakdown, onlineRateFor, orgRate, nativePrice, nativeRate, STORE_COST, EP_TIERS, EP_TIER_ORDER, EP_TIER_NAMES, EP_YEAR_MONTHS, EP_DEFAULT_TIER, epTierKey, epTierOf, epCurrencyFor, epAmount, epRefDisc } from './_rate.js';
-import { applyEpUpgrade, notifyEpDowngradeScheduled, finishEpYearly, notifyEpMonthlyScheduled, epScheduleMonthly } from './_ep.js';
+import { applyEpUpgrade, notifyEpDowngradeScheduled, finishEpYearly, notifyEpMonthlyScheduled, epScheduleMonthly, epEnsureProduct } from './_ep.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 import { checkPrice, offerPrices, planTermPrices, checkOnlineCountry } from './_price-check.js';
 import { vatMode } from './_vat.js';
@@ -1094,6 +1094,7 @@ async function partnerChange(req, res) {
   const item = sub.items && sub.items.data && sub.items.data[0];
   if (!item || !item.price || !item.price.recurring) return res.status(409).json({ error: 'Předplatné nemá položku k úpravě.' });
   const product = typeof item.price.product === 'string' ? item.price.product : item.price.product.id;
+  if (!_preview) await epEnsureProduct(product);
   const rec = { interval: item.price.recurring.interval, interval_count: item.price.recurring.interval_count || 1 };
   const baseMd = Object.assign({}, sub.metadata || {});
   const subCur = String(item.price.currency || 'czk').toUpperCase();   // předplatné si měnu drží

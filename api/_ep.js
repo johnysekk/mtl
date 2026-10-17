@@ -185,8 +185,19 @@ export async function finishEpYearly(uid, subId, { paid, currency } = {}) {
 // Jen interval a počet: cena načtená ze Stripe nese i prázdná pole (meter, trial_period_days…),
 // která by prices.create odmítl.
 const _rec = (r) => ({ interval: r.interval, interval_count: r.interval_count || 1 });
+// PRODUKT PŘEDPLATNÉHO MUSÍ BÝT AKTIVNÍ. První platba ho založí přes price_data.product_data a
+// Stripe takový produkt vede jako neaktivní: novou cenu na něm vytvoří, ale předplatné na ni
+// nepřevede („The product … is marked as inactive"). Proto se před každou změnou ceny zapne.
+export async function epEnsureProduct(product) {
+  try {
+    const pr = await stripe.products.retrieve(product);
+    if (pr && pr.active === false) await stripe.products.update(product, { active: true });
+  } catch (e) { console.error('[ep] product activate', e.message); }
+  return product;
+}
 async function _monthPrice(it, monthUnit) {
   const product = typeof it.price.product === 'string' ? it.price.product : it.price.product.id;
+  await epEnsureProduct(product);
   const rec = it.price.recurring || {};
   return stripe.prices.create({ currency: it.price.currency, product, unit_amount: monthUnit,
     recurring: rec.interval === 'day' ? _rec(rec) : { interval: 'month', interval_count: 1 } });   // test: denně
@@ -255,6 +266,7 @@ export async function repriceEpForRefDisc(uid) {
       newShown = mUnit / 100; oldShown = mOld / 100; per = 'month';
     } else {
       if (newUnit >= oldUnit) { await stripe.subscriptions.update(s.id, { metadata: { ep_ref_disc: String(disc) } }); return false; }
+      await epEnsureProduct(product);
       const np = await stripe.prices.create({ currency: it.price.currency, product, unit_amount: newUnit, recurring: _rec(rec) });
       await stripe.subscriptions.update(s.id, { items: [{ id: it.id, price: np.id }], proration_behavior: 'none', metadata });
       newShown = newUnit / 100; oldShown = oldUnit / 100;
