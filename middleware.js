@@ -17,6 +17,8 @@ function claimsOf(tok) {
 }
 
 export default function middleware(request) {
+  // Přihlášení na důvěryhodném zařízení: tady se teprve získává kód, token je ještě bez něj.
+  try { if (new URL(request.url).pathname === '/api/mfa-device') return; } catch (e) {}
   const h = request.headers;
   const tok = String(h.get('x-access-token') || '').trim()
     || String(h.get('authorization') || '').replace(/^Bearer\s+/i, '').trim();

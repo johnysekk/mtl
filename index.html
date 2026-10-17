@@ -779,7 +779,6 @@ input[type="date"]::-webkit-date-and-time-value{ text-align:left; }
       <!-- Nápověda se ukáže jen při registraci: pravidla mají být vidět PŘED odesláním, ne až
            v chybové hlášce. Při přihlášení by jen mátla. -->
       <div id="authPassHint" style="display:none;font-size:11.5px;color:var(--mid);line-height:1.5;margin-bottom:14px;">Aspoň 8 znaků, písmeno, číslice a speciální znak.</div>
-  <label id="authRememberWrap" style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--mid);margin:4px 0 14px;cursor:pointer;"><input type="checkbox" id="authRemember" checked style="width:17px;height:17px;flex:none;"> <span id="authRememberLbl">Pamatovat si mě na tomto zařízení</span></label>
   <input id="authPass2" type="password" placeholder="Heslo znovu" autocomplete="new-password" style="display:none;width:100%;padding:14px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;margin-bottom:12px;font-family:'DM Sans';">
 
 
@@ -6855,8 +6854,6 @@ function updateAuthTexts(){
   if($('authForgot')) $('authForgot').textContent = LANG==='en'?'Forgot password?':'Zapomenuté heslo?';
   if($('authMagic')) $('authMagic').textContent = LANG==='en'?'✉️ Sign in with email link (no password)':'✉️ Přihlásit přes e-mailový odkaz (bez hesla)';
   if($('authForgotWrap')) $('authForgotWrap').style.display = reg ? 'none' : 'block';
-  if($('authRememberWrap')) $('authRememberWrap').style.display = reg ? 'none' : 'flex';
-  if($('authRememberLbl')) $('authRememberLbl').textContent = LANG==='en'?'Remember me on this device':'Pamatovat si mě na tomto zařízení';
   if($('authInvite')) $('authInvite').placeholder = LANG==='en'?'Invite code':'Zvací kód';
   if($('authName')) $('authName').placeholder = LANG==='en'?'Full name (first and last)':'Cel\u00e9 jm\u00e9no (jm\u00e9no a p\u0159\u00edjmen\u00ed)';
   renderAuthDisc();
@@ -53088,7 +53085,6 @@ $('btnAuthSubmit').onclick=async()=>{
       return;
     }
     $('authError').style.display='none';
-    _mtlRememberSet();
     if(!(await _mfaGate())) return;
     // Načti profil
     const { data: prof } = await supaClient.from('profiles_me').select('*').eq('id', data.user.id).single();
@@ -55298,9 +55294,10 @@ async function _resumeReg(userId, email){
 }
 // ═══ DVOUFÁZOVÉ OVĚŘENÍ (2FA) ═════════════════════════════════════════════════════════
 // Kód z aplikace (Google Authenticator, Microsoft Authenticator, 1Password…), 6 číslic po 30 s.
-// Zapíná se v Nastavení → Zabezpečení. Kdo ho má zapnuté, po zadání hesla (i po přihlášení
-// odkazem z e-mailu) musí zadat kód; databáze i server bez něj nic nepustí (sql/mfa.sql,
-// middleware.js). Na zařízení, kde zůstane přihlášený, se kód znovu nechce.
+// DOBROVOLNÉ: zapíná se až v Nastavení → Zabezpečení; kdo ho nezapne, nic se pro něj nemění.
+// Kdo ho má zapnuté, po zadání hesla (i po přihlášení odkazem z e-mailu) zadá kód; databáze
+// i server bez něj nic nepustí (sql/mfa.sql, middleware.js). U kódu jde zaškrtnout „Na tomto
+// zařízení už nepožadovat" -- pak se na tom zařízení kód doplní sám (api/mfa-device.js).
 const _mfaOvCss='position:fixed;inset:0;z-index:100250;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:18px;';
 const _mfaBoxCss='background:#fff;border-radius:16px;max-width:400px;width:100%;padding:22px;font-family:\'DM Sans\',sans-serif;max-height:92vh;overflow-y:auto;box-sizing:border-box;';
 const _mfaInpCss='width:100%;box-sizing:border-box;padding:14px;border:1.5px solid var(--border);border-radius:12px;font-size:22px;letter-spacing:6px;text-align:center;font-family:inherit;margin:4px 0 12px;';
@@ -55316,9 +55313,30 @@ async function _mfaGate(){
   try{
     const { data, error }=await supaClient.auth.mfa.getAuthenticatorAssuranceLevel();
     if(error || !data) return true;
-    if(data.nextLevel==='aal2' && data.currentLevel!=='aal2') return await _mfaPrompt();
+    if(data.nextLevel==='aal2' && data.currentLevel!=='aal2'){
+      const f=(await _mfaFactors()).totp; if(!f) return true;
+      if(await _mfaTryDevice(f)) return true;
+      return await _mfaPrompt();
+    }
     return true;
   }catch(e){ return true; }
+}
+async function _mfaApi(body){
+  try{ const s=await supaClient.auth.getSession(); const t=(s&&s.data&&s.data.session&&s.data.session.access_token)||'';
+    const r=await fetch('/api/mfa-device',{ method:'POST', headers:{ 'Content-Type':'application/json', 'x-access-token':t }, body:JSON.stringify(body) });
+    const j=await r.json().catch(function(){ return {}; }); j._status=r.status; return j; }catch(e){ return { _status:0 }; }
+}
+async function _mfaUid(){ try{ const s=await supaClient.auth.getSession(); return (s&&s.data&&s.data.session&&s.data.session.user&&s.data.session.user.id)||''; }catch(e){ return ''; } }
+// Důvěryhodné zařízení: kód doplní server z uloženého klíče, člověk nic nezadává.
+async function _mfaTryDevice(f){
+  try{
+    const uid=await _mfaUid(); if(!uid) return false;
+    const dt=localStorage.getItem('mtl_mfa_dev_'+uid); if(!dt) return false;
+    const j=await _mfaApi({ action:'code', device_token:dt });
+    if(!j.code){ if(j._status===404) localStorage.removeItem('mtl_mfa_dev_'+uid); return false; }
+    const v=await supaClient.auth.mfa.challengeAndVerify({ factorId:j.factor_id||f.id, code:j.code });
+    return !v.error;
+  }catch(e){ return false; }
 }
 function _mfaPrompt(){
   const EN=LANG==='en';
@@ -55331,6 +55349,7 @@ function _mfaPrompt(){
       +'<div style="font-size:18px;font-weight:800;color:var(--dark);text-align:center;margin:6px 0 6px;">'+(EN?'Two-step verification':'Dvoufázové ověření')+'</div>'
       +'<div style="font-size:13.5px;color:var(--mid);line-height:1.5;text-align:center;margin-bottom:12px;">'+(EN?'Enter the 6-digit code from your authenticator app.':'Zadej šestimístný kód z ověřovací aplikace (např. Google Authenticator).')+'</div>'
       +'<input id="mfaCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000" style="'+_mfaInpCss+'">'
+      +'<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--mid);margin:0 0 12px;cursor:pointer;"><input type="checkbox" id="mfaTrust" style="width:17px;height:17px;flex:none;"> '+(EN?'Don\u2019t ask again on this device':'Na tomto za\u0159\u00edzen\u00ed u\u017e nepo\u017eadovat')+'</label>'
       +'<div id="mfaErr" style="display:none;color:var(--red);font-size:13px;font-weight:600;text-align:center;margin:-4px 0 10px;"></div>'
       +'<button id="mfaGo" style="'+_mfaBtnCss+'background:var(--red);color:#fff;">'+(EN?'Verify':'Ověřit')+'</button>'
       +'<button id="mfaOut" style="'+_mfaBtnCss+'background:none;color:var(--mid);font-weight:600;margin-top:6px;">'+(EN?'Log out':'Odhlásit se')+'</button>'
@@ -55346,6 +55365,9 @@ function _mfaPrompt(){
       const { error }=await supaClient.auth.mfa.challengeAndVerify({ factorId:f.id, code:code });
       go.disabled=false;
       if(error){ err.textContent=/invalid|expired/i.test(error.message||'')?(EN?'Wrong or expired code — try the current one.':'Špatný nebo prošlý kód — zadej aktuální.'):(error.message||''); err.style.display='block'; inp.value=''; inp.focus(); return; }
+      if(ov.querySelector('#mfaTrust') && ov.querySelector('#mfaTrust').checked){
+        try{ const t=await _mfaApi({ action:'trust' }); const uid=await _mfaUid(); if(t.token && uid) localStorage.setItem('mtl_mfa_dev_'+uid, t.token); }catch(e){}
+      }
       try{ ov.remove(); }catch(e){}
       resolve(true);
     };
@@ -55370,11 +55392,15 @@ async function openSecuritySettings(){
   if(st.totp){
     ov.innerHTML='<div style="'+_mfaBoxCss+'">'+head
       +'<div style="font-size:13.5px;color:var(--green);font-weight:700;margin-bottom:8px;">✓ '+(EN?'On — after your password we ask for a code from your authenticator app.':'Zapnuto — po hesle chceme kód z ověřovací aplikace.')+'</div>'
+      +'<div id="mfaDevRow" style="font-size:13px;color:var(--mid);line-height:1.5;margin-bottom:12px;"></div>'
       +'<div style="font-size:13px;color:var(--mid);line-height:1.5;margin-bottom:10px;">'+(EN?'To turn it off, enter the current code:':'Pro vypnutí zadej aktuální kód:')+'</div>'
       +'<input id="mfaOffCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000" style="'+_mfaInpCss+'">'
       +'<div id="mfaOffErr" style="display:none;color:var(--red);font-size:13px;font-weight:600;margin:-4px 0 10px;"></div>'
       +'<button id="mfaOffGo" style="'+_mfaBtnCss+'background:var(--dark);color:#fff;">'+(EN?'Turn off 2FA':'Vypnout 2FA')+'</button>'+cancel+'</div>';
     wire();
+    (async function(){ const d=await _mfaApi({ action:'devices' }); const row=ov.querySelector('#mfaDevRow'); if(!row) return; const n=Number(d.count)||0;
+      row.innerHTML=(EN?'Devices where the code is not asked: ':'Zařízení, kde se kód nechce: ')+'<b>'+n+'</b>'+(n?(' \u00b7 <span id="mfaRevoke" style="color:var(--red);text-decoration:underline;cursor:pointer;">'+(EN?'cancel all':'zrušit všechna')+'</span>'):'');
+      const rv=row.querySelector('#mfaRevoke'); if(rv) rv.onclick=async function(){ const r=await _mfaApi({ action:'revoke' }); if(r.ok){ try{ localStorage.removeItem('mtl_mfa_dev_'+(await _mfaUid())); }catch(e){} row.innerHTML=(EN?'Devices where the code is not asked: ':'Zařízení, kde se kód nechce: ')+'<b>0</b>'; toast(EN?'Done \u2014 the code will be asked everywhere':'Hotovo \u2014 kód se bude chtít všude',1); } }; })();
     const ci=ov.querySelector('#mfaOffCode'), er=ov.querySelector('#mfaOffErr');
     ci.oninput=function(){ ci.value=String(ci.value||'').replace(/\D/g,'').slice(0,6); };
     ov.querySelector('#mfaOffGo').onclick=async function(){
@@ -55384,6 +55410,7 @@ async function openSecuritySettings(){
       const u=await supaClient.auth.mfa.unenroll({ factorId:st.totp.id });
       if(u.error){ er.textContent=u.error.message||''; er.style.display='block'; return; }
       try{ await supaClient.auth.refreshSession(); }catch(e){}
+      try{ await _mfaApi({ action:'forget' }); localStorage.removeItem('mtl_mfa_dev_'+(await _mfaUid())); }catch(e){}
       toast(EN?'2FA turned off':'2FA vypnuto',1); close();
     };
     return;
@@ -55415,27 +55442,13 @@ async function openSecuritySettings(){
       const v=await supaClient.auth.mfa.challengeAndVerify({ factorId:fid, code:code });
       if(v.error){ er.textContent=EN?'Wrong code — check the time on your phone and enter the current code.':'Špatný kód — zkontroluj čas v telefonu a zadej aktuální kód.'; er.style.display='block'; return; }
       try{ await supaClient.auth.refreshSession(); }catch(e){}
+      try{ await _mfaApi({ action:'secret', factor_id:fid, secret:sec }); }catch(e){}
       toast(EN?'✅ 2FA is on':'✅ 2FA zapnuto',1); close();
     };
   };
 }
-// „PAMATOVAT SI MĚ NA TOMTO ZAŘÍZENÍ": bez zaškrtnutí se přihlášení po zavření prohlížeče /
-// appky zahodí. sessionStorage žije jen do zavření; při dalším otevření chybí -> odhlásit.
-async function _mtlForgetCheck(){
-  try{
-    if(localStorage.getItem('mtl_forget')==='1' && !sessionStorage.getItem('mtl_alive')){
-      localStorage.removeItem('mtl_forget');
-      try{ await supaClient.auth.signOut({ scope:'local' }); }catch(e){}
-    }
-    sessionStorage.setItem('mtl_alive','1');
-  }catch(e){}
-}
-function _mtlRememberSet(){
-  try{ const c=$('authRemember'); if(c && !c.checked){ localStorage.setItem('mtl_forget','1'); sessionStorage.setItem('mtl_alive','1'); } else localStorage.removeItem('mtl_forget'); }catch(e){}
-}
 document.addEventListener('click', function(e){ const t=e.target && e.target.closest && e.target.closest('#sSecurity'); if(t){ try{ openSecuritySettings(); }catch(_){} } });
 async function checkAuth(){
-  await _mtlForgetCheck();
   const { data } = await supaClient.auth.getSession();
   if(data.session){
     if(!(await _mfaGate())) return;
