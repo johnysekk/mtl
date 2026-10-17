@@ -47,12 +47,14 @@ export default async function handler(req, res) {
   const cc = String((req.query && req.query.cc) || '')
     .toLowerCase().replace(/[^a-z,]/g, '').slice(0, 64);
   const kind = (req.query && req.query.kind) === 'place' ? 'place' : null;
+  const nlat = parseFloat(req.query && req.query.lat), nlng = parseFloat(req.query && req.query.lon);
+  const near = (isFinite(nlat) && isFinite(nlng)) ? { lat: nlat, lng: nlng } : null;
 
   // Krátké dotazy nemá smysl posílat dál: vrátí půl města a stejně se přepisují.
   if (q.length < 3) { res.setHeader('Cache-Control', 'no-store'); return res.status(200).json([]); }
 
   const full = q + (city && q.toLowerCase().indexOf(city.toLowerCase()) < 0 ? (', ' + city) : '');
-  const key = providerName() + '|' + lang + '|' + limit + '|' + cc + '|' + (kind || '') + '|' + full.toLowerCase();
+  const key = providerName() + '|' + lang + '|' + limit + '|' + cc + '|' + (kind || '') + '|' + (near ? Math.round(near.lat) + ',' + Math.round(near.lng) : '') + '|' + full.toLowerCase();
 
   const hit = cacheGet(key);
   if (hit) {
@@ -62,7 +64,7 @@ export default async function handler(req, res) {
 
   try {
     // Posíláme jen to, co appka potřebuje (tvar Nominatimu + přesnost a poskytovatel).
-    const out = (await geoSearch(full, { cc, lang, limit, kind })).slice(0, limit);
+    const out = (await geoSearch(full, { cc, lang, limit, kind, near })).slice(0, limit);
     cacheSet(key, out);
     res.setHeader('Cache-Control', 'public, max-age=120');
     return res.status(200).json(out);

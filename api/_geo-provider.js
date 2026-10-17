@@ -84,6 +84,50 @@ async function osmReverse(lat, lon, o, base, key) {
   return { display_name: d && d.display_name, address: (d && d.address) || {}, lat, lon, precision: nomPrecision(d || {}) };
 }
 
+// ── Našeptávání míst (obce, části obcí) při psaní ────────────────────────────────────
+// Nominatim prefix neumí: „Brno-stř" nenajde nic, „Brno-střed" ano. Pro našeptávač míst se
+// proto bere služba, která píšícímu rozumí:
+//   * nominatim (zdarma)  -> Photon (photon.komoot.io, OpenStreetMap, zdarma, férové užití),
+//   * locationiq          -> LocationIQ Autocomplete,
+//   * mapbox              -> Mapbox umí sám (autocomplete=true),
+//   * google              -> Geocoding (bez prefixu; pro našeptávač by chtělo Places API).
+const PH_PREC = { city: 'city', district: 'district', locality: 'district', county: 'region', state: 'region', country: 'country', street: 'street', house: 'address' };
+async function photonPlaces(q, o) {
+  const p = new URLSearchParams({ q, limit: String(Math.min(20, o.limit * 3)) });
+  ['city', 'district', 'locality'].forEach((l) => p.append('layer', l));
+  if (['en', 'de', 'fr', 'it'].includes(o.lang)) p.set('lang', o.lang);
+  // Bez filtru země u Photonu: přednost dostanou místa blízko člověka, cizí země se vyřadí níž.
+  if (o.near) { p.set('lat', String(o.near.lat)); p.set('lon', String(o.near.lng)); }
+  const r = await fetch(`https://photon.komoot.io/api/?${p}`, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
+  if (!r.ok) { const e = new Error('geocoder_unavailable'); e.status = r.status; throw e; }
+  const d = await r.json();
+  return ((d && d.features) || []).map((f) => {
+    const pr = f.properties || {}, c = (f.geometry && f.geometry.coordinates) || [];
+    const t = String(pr.type || '').toLowerCase();
+    const isCity = t === 'city';
+    const address = { suburb: isCity ? (pr.district || undefined) : pr.name, city: isCity ? pr.name : (pr.city || pr.county || undefined),
+      state: pr.state || undefined, county: pr.county || undefined, country: pr.country || undefined,
+      country_code: String(pr.countrycode || '').toLowerCase() || undefined };
+    const ex = pr.extent;
+    return { display_name: [pr.name, isCity ? null : pr.city, pr.state, pr.country].filter(Boolean).join(', '), lat: String(c[1]), lon: String(c[0]),
+      boundingbox: ex ? [String(ex[3]), String(ex[1]), String(ex[0]), String(ex[2])] : null, address, type: t, class: 'photon', precision: PH_PREC[t] || 'city' };
+  });
+}
+async function liqAutocomplete(q, o) {
+  const p = new URLSearchParams({ key: process.env.LOCATIONIQ_KEY, q, limit: String(Math.min(20, o.limit)), 'accept-language': o.lang, dedupe: '1',
+    tag: 'place:city,place:town,place:village,place:hamlet,place:suburb,place:quarter,place:neighbourhood,place:borough' });
+  if (o.cc) p.set('countrycodes', o.cc);
+  const r = await fetch(`https://api.locationiq.com/v1/autocomplete?${p}`, { headers: { Accept: 'application/json' } });
+  if (!r.ok) { const e = new Error('geocoder_unavailable'); e.status = r.status; throw e; }
+  const d = await r.json();
+  return (Array.isArray(d) ? d : []).map((x) => {
+    const a = Object.assign({}, x.address || {});
+    if (DISTRICT.includes(String(x.type || '')) && a.name && !a.suburb) a.suburb = a.name;
+    if (CITY.includes(String(x.type || '')) && a.name && !a.city) a.city = a.name;
+    return { display_name: x.display_name, lat: x.lat, lon: x.lon, boundingbox: x.boundingbox || null, address: a, type: x.type, class: x.class, precision: nomPrecision({ address: a, type: x.type }) };
+  });
+}
+
 // ── Mapbox Geocoding v6 ───────────────────────────────────────────────────────────────
 const MB_PREC = { address: 'address', street: 'street', neighborhood: 'district', locality: 'district', district: 'region',
   postcode: 'postcode', place: 'city', region: 'region', country: 'country' };
@@ -176,9 +220,18 @@ async function gReverse(lat, lon, o) {
 // o: { cc:'cz' | 'cz,sk', lang:'cs', limit:1..12, kind:'address'|'place'|null }
 export async function geoSearch(q, o = {}) {
   const opt = { cc: String(o.cc || '').toLowerCase().replace(/[^a-z,]/g, '').slice(0, 64), lang: String(o.lang || 'cs').slice(0, 5),
-    limit: Math.max(1, Math.min(12, parseInt(o.limit, 10) || 8)), kind: o.kind || null };
+    limit: Math.max(1, Math.min(12, parseInt(o.limit, 10) || 8)), kind: o.kind || null,
+    near: (o.near && isFinite(+o.near.lat) && isFinite(+o.near.lng)) ? { lat: Math.round(+o.near.lat * 100) / 100, lng: Math.round(+o.near.lng * 100) / 100 } : null };
   const p = providerName();
   let rows;
+  // Našeptávač míst: služba s vyhledáváním podle začátku slova; když selže, běžné hledání.
+  if (opt.kind === 'place' && (p === 'nominatim' || p === 'locationiq') && process.env.GEO_PLACE_AUTOCOMPLETE !== 'off') {
+    try {
+      const ac = p === 'locationiq' ? await liqAutocomplete(q, opt) : await photonPlaces(q, opt);
+      const ok = ac.filter((x) => _ccOk(x, opt.cc) && isFinite(parseFloat(x.lat)) && isFinite(parseFloat(x.lon))).slice(0, opt.limit);
+      if (ok.length) return ok.map((x) => Object.assign(x, { provider: p === 'locationiq' ? 'locationiq' : 'photon' }));
+    } catch (e) { console.error('[geo] autocomplete', e.status || '', e.message); }
+  }
   if (p === 'mapbox') rows = await mbSearch(q, opt);
   else if (p === 'google') rows = await gSearch(q, opt);
   else if (p === 'locationiq') rows = await osmSearch(q, opt, 'https://us1.locationiq.com/v1', process.env.LOCATIONIQ_KEY);
