@@ -6474,6 +6474,12 @@ function notifText(n){
   }catch(e){}
   return n.message || '';
 }
+// Odkaz z notifikace otevřít jen na Stripe (faktura, platba) nebo v MTL. Notifikaci může založit
+// i jiný uživatel -- odkaz na cizí web by byl ideální podvrh („zaplať tady").
+function _safeNotifUrl(u){
+  try{ const x=new URL(String(u), location.origin); if(x.origin===location.origin) return true;
+    return x.protocol==='https:' && /(^|\.)stripe\.com$/.test(x.hostname); }catch(e){ return false; }
+}
 function notifKind(n){
   try{ const d = n.data ? (typeof n.data==='string'?JSON.parse(n.data):n.data) : null; return d && d.kind ? d.kind : null; }catch(e){ return null; }
 }
@@ -21323,9 +21329,8 @@ async function _cohJoinWaitlist(d, ov, btn){
       if(btn){ btn.disabled=false; btn.textContent='\u23f3 '+(EN?'Join the waitlist':'Zapsat na čekačku'); }
       return;
     }
-    const ins={ cohort_id:cid, name:nm, email:em, phone:(ph||null), status:'waitlist' };
-    try{ if(currentUser&&currentUser.id) ins.attribution=_acqSrc&&typeof _acqSrc==='function'?null:null; }catch(e){}
-    const { error } = await supaClient.from('cohort_members').insert(Object.assign({ attr_src:_attrGet() }, ins));
+    // Čekačku zapisuje server (api/guest) -- zapsat se může i člověk bez účtu.
+    let error=null; try{ const _wr=await fetch('/api/guest',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ action:'cohort_waitlist', cohortId:cid, name:nm, email:em, phone:(ph||null), attr:_attrGet() }) }); const _wj=await _wr.json().catch(function(){ return {}; }); if(!_wr.ok) error={ message:_wj.error||('HTTP '+_wr.status) }; }catch(e){ error={ message:(e&&e.message)||'' }; }
     if(error){ toast('\u26a0\ufe0f '+error.message); if(btn){ btn.disabled=false; btn.textContent='\u23f3 '+(EN?'Join the waitlist':'Zapsat na čekačku'); } return; }
     if(ov) ov.remove();
     toast(EN?'\u2705 You\u2019re on the waitlist \u2014 the club will reach out if a spot opens.':'\u2705 Jsi na čekačce \u2014 klub se ozve, jakmile se místo uvolní.',1);
@@ -21895,7 +21900,7 @@ async function openCohortSignup(cohortId, fromColdLink){
     try{
       const _ma=ov.querySelector('#cohMemberApp');
       if(_ma && _ma.checked && d && d.gym_org_form==='nonprofit' && d.gym_id){
-        await supaClient.from('gym_member_applications').insert({
+        const _maRow={
           gym_id: d.gym_id,
           student_id: (typeof currentUser!=='undefined'&&currentUser) ? currentUser.id : null,
           // Přihláška za dítě: přihláška je dítěte, zákonný zástupce je ten, kdo vyplňuje.
@@ -21910,7 +21915,10 @@ async function openCohortSignup(cohortId, fromColdLink){
           app_type: (d.member_app_type||null), app_text: (_memberAppConfirmText(Object.assign({}, d, { name:d.gym_name||'' }), EN)+(function(){ try{ const _l=_ma.closest('label'); return _l?('\n\n\u2611 '+_l.textContent.trim()):''; }catch(e){ return ''; } })()),
           source: 'cohort', cohort_id: (d.id||null),
           doc_url: (d.member_app_file_url||null), doc_name: (d.member_app_file_name||null), doc_hash: (d.member_app_file_hash||null),
-        });
+        };
+        // Bez účtu zapisuje přihlášku server (api/guest), přihlášený rovnou za sebe.
+        if(_maRow.student_id) await supaClient.from('gym_member_applications').insert(_maRow);
+        else await fetch('/api/guest',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(Object.assign({ action:'member_application', gymId:_maRow.gym_id, cohortId:_maRow.cohort_id }, _maRow)) });
       }
     }catch(e){ console.error('member application', e); }
     // Marketingový souhlas jen když ho člověk opravdu zaškrtl, se zněním, které viděl. (Dřív se
@@ -35088,7 +35096,7 @@ async function loadNotifications(append){
     if(false && k==='minor_waiver'){
       const dd=(()=>{ try{ return JSON.parse(n.data||'{}'); }catch(e){ return {}; } })();
       el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;`;
-      el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${notifText(n)}</p>
+      el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${escapeHtml(notifText(n))}</p>
         <div style="margin-top:10px;">
           <button class="mwOpen" style="width:100%;padding:10px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Review & decide':'Zobrazit a rozhodnout'}</button>
         </div>`;
@@ -35103,7 +35111,7 @@ async function loadNotifications(append){
     if(k==='minor_event_consent'){
       const dd=(()=>{ try{ return JSON.parse(n.data||'{}'); }catch(e){ return {}; } })();
       el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;`;
-      el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${notifText(n)}</p>
+      el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${escapeHtml(notifText(n))}</p>
         <div style="margin-top:10px;">
           <button class="mevOpen" style="width:100%;padding:10px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Review & decide':'Zobrazit a rozhodnout'}</button>
         </div>`;
@@ -35116,7 +35124,7 @@ async function loadNotifications(append){
     if(k==='family_qr_coach'){
       const dd=(()=>{ try{ return JSON.parse(n.data||'{}'); }catch(e){ return {}; } })();
       el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;`;
-      el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${notifText(n)}</p>
+      el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${escapeHtml(notifText(n))}</p>
         <div style="margin-top:10px;">
           <button class="fqrShow" style="width:100%;padding:10px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Show check-in QR':'Zobrazit check-in QR'}</button>
         </div>`;
@@ -35127,7 +35135,7 @@ async function loadNotifications(append){
     if(false && k==='family_request'){
       const dd=(()=>{ try{ return JSON.parse(n.data||'{}'); }catch(e){ return {}; } })();
       el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;`;
-      el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${notifText(n)}</p>
+      el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${escapeHtml(notifText(n))}</p>
         <div style="display:flex;gap:8px;margin-top:10px;">
           <button class="faAcc" style="flex:1;padding:10px;background:var(--green);color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Approve':'Schválit'}</button>
           <button class="faDec" style="flex:1;padding:10px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Reject':'Zamítnout'}</button>
@@ -35145,7 +35153,7 @@ async function loadNotifications(append){
     if(k==='gym_team_invite' || k==='gym_reception_invite'){
       const dd=(()=>{ try{ return JSON.parse(n.data||'{}'); }catch(e){ return {}; } })();
       el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;`;
-      el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${notifText(n)}</p>
+      el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${escapeHtml(notifText(n))}</p>
         <div style="display:flex;gap:8px;margin-top:10px;">
           <button class="gtAccept" style="flex:1;padding:10px;background:var(--green);color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Join team':'Přidat se'}</button>
           <button class="gtDecline" style="flex:1;padding:10px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Decline':'Odmítnout'}</button>
@@ -35166,7 +35174,7 @@ async function loadNotifications(append){
       else if(rk==='dovolena'){ wishKey='holiday'; wishLabel=LANG==='en'?'☀️ Wish a great holiday':'☀️ Popřát hezkou dovolenou'; }
       else if(rk==='prace'){ wishKey='work'; wishLabel=LANG==='en'?'💪 May work go smoothly':'💪 Ať to jde od ruky'; }
       el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;`;
-      el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${notifText(n)}</p>
+      el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${escapeHtml(notifText(n))}</p>
         <div style="font-size:11px;color:var(--light);margin-top:6px;">${d.getDate()}.${d.getMonth()+1}. ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}</div>
         <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">
           ${wishKey?`<button class="exWish" style="flex:1;min-width:150px;padding:10px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${wishLabel}</button>`:''}
@@ -35180,7 +35188,7 @@ async function loadNotifications(append){
     if(k==='walkin_drop'){
       const dd=(()=>{ try{ return JSON.parse(n.data||'{}'); }catch(e){ return {}; } })();
       el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;cursor:pointer;`;
-      el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${notifText(n)}</p><div style="font-size:11px;color:var(--light);margin-top:6px;">${d.getDate()}.${d.getMonth()+1}. ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}</div>`;
+      el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${escapeHtml(notifText(n))}</p><div style="font-size:11px;color:var(--light);margin-top:6px;">${d.getDate()}.${d.getMonth()+1}. ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}</div>`;
       el.onclick=()=>{ if(dd.occ && dd.gym && typeof _notifOpenAttendance==='function') _notifOpenAttendance(dd.gym, dd.occ); else if(dd.gym && typeof openReception==='function') openReception(dd.gym); else if(dd.gym && typeof openGymStats==='function') openGymStats(dd.gym, dd.gym_name||''); };
       list.appendChild(el); return;
     }
@@ -35190,7 +35198,7 @@ async function loadNotifications(append){
       // takze bylo prazdne a notifikace nesla otevrit nikdy.
       const _clickable = !!dd.gym_id;
       el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;${_clickable?'cursor:pointer;':''}`;
-      el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${notifText(n)}</p><div style="font-size:11px;color:var(--light);margin-top:6px;">${d.getDate()}.${d.getMonth()+1}. ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}</div>${_clickable?`<div style="font-size:12.5px;color:#1e57c9;font-weight:700;margin-top:8px;">${LANG==='en'?'member profile ›':'profil člena ›'}</div>`:''}`;
+      el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${escapeHtml(notifText(n))}</p><div style="font-size:11px;color:var(--light);margin-top:6px;">${d.getDate()}.${d.getMonth()+1}. ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}</div>${_clickable?`<div style="font-size:12.5px;color:#1e57c9;font-weight:700;margin-top:8px;">${LANG==='en'?'member profile ›':'profil člena ›'}</div>`:''}`;
       if(_clickable){ el.onclick=async()=>{
         try{
           const { data:g } = await supaClient.from('gyms_pub').select('*').eq('id',dd.gym_id).single();
@@ -35376,7 +35384,7 @@ async function loadNotifications(append){
     else if(k==='event_cohost_declined'||k==='event_cohost_left') linkLabel = LANG==='en'?'Event co-hosts ›':'Spolupořadatelé akce ›';
     else if(k==='beta_pending') linkLabel = LANG==='en'?'Open admin ›':'Otevřít admin ›';
     el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;${clickable?'cursor:pointer;':''}`;
-    el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${notifText(n)}</p><div style="font-size:11px;color:var(--light);margin-top:6px;">${d.getDate()}.${d.getMonth()+1}. ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}${clickable?` · <span style="color:var(--blue);font-weight:600;">${linkLabel}</span>`:''}</div>`;
+    el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${escapeHtml(notifText(n))}</p><div style="font-size:11px;color:var(--light);margin-top:6px;">${d.getDate()}.${d.getMonth()+1}. ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}${clickable?` · <span style="color:var(--blue);font-weight:600;">${linkLabel}</span>`:''}</div>`;
     if(clickable){
       el.onclick=async()=>{
         closeSheet('shNotif');
@@ -35573,7 +35581,7 @@ async function loadNotifications(append){
         else if(isMembRenewing){ openSheet('shMemberships'); loadMyMemberships(); }
         else if(isCohortEnded){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.cohort_id && typeof openCohortRoster==='function') openCohortRoster(dd.cohort_id, dd.cohort_name||''); }catch(e){} }
         else if(isMembExpired||isMembExpiring){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ const { data: g }=await supaClient.from('gyms_pub').select('*').eq('id',dd.gym_id).single(); if(g) openGymProfile(g); else toast(L('⚠️ Klub nenalezen')); } }catch(e){ toast(L('⚠️ Klub nenalezen')); } }
-        else if(k==='membership_payment_failed'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.url){ window.open(dd.url,'_blank'); } else { openSheet('shMemberships'); loadMyMemberships(); } }catch(e){ openSheet('shMemberships'); loadMyMemberships(); } }
+        else if(k==='membership_payment_failed'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.url && _safeNotifUrl(dd.url)){ window.open(dd.url,'_blank'); } else { openSheet('shMemberships'); loadMyMemberships(); } }catch(e){ openSheet('shMemberships'); loadMyMemberships(); } }
         else if(isExcused){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.student_id){ messageGymMember(dd.student_id, dd.member||''); } else { toast(L('⚠️ Chyba')); } }catch(e){ toast(L('⚠️ Chyba')); } }
         // EP: rovnou nabídka stupňů -- ukazuje dnešní stupeň, naplánovaný přechod, obnovení i zrušení.
         else if(isPartnerGranted||isPartnerCancelSched){ closeAllSheets&&closeAllSheets(); _epReloadMe().then(function(){ openPartnerInfo(); }); }
@@ -56845,11 +56853,12 @@ async function showPaidPopup(){
        try{
         const payee = await resolveGymPayee(g, {coach});
         if(!payee.account){ _gErr(_gEN?'Payments are not set up for this class yet.':'Platby za tuhle lekci zatím nejsou nastavené.'); return; }
-        const rec={ gym_id:gymId, paid_to:payee.coachId?'coach':'gym', amount:amt, currency:cur, status:'pending', reception_checkin:true, guest_token:tok, guest_email:_termsEmail||null, date:date, time:time, class_name:cls, class_date:date, class_time:time, level:level, coach_id:payee.coachId||coach||null, discipline:disc, gym_name:g.name||'Klub' };
-        const { data: bk, error } = await supaClient.from('gym_bookings').insert(Object.assign({ attr_src:_attrGet() }, rec)).select().single();
-        if(error){ console.error('[guest_pay] booking', error); _gErr((_gEN?'The booking could not be created: ':'Rezervaci se nepodařilo založit: ')+(error.message||error.code||'')); return; }
+        // Rezervaci hosta zakládá server (api/guest): host není přihlášený a databáze mu zápis nedovolí.
+        const _gr=await fetch('/api/guest',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ action:'dropin_book', gymId:gymId, coachId:payee.coachId||null, amount:amt, currency:cur, cls:cls, date:date, time:time, level:level, disc:disc, tok:tok, email:_termsEmail||null, attr:_attrGet() }) });
+        const _gj=await _gr.json().catch(function(){ return {}; });
+        if(!_gr.ok || !_gj.id){ _gErr((_gEN?'The booking could not be created: ':'Rezervaci se nepodařilo založit: ')+(_gj.error||('HTTP '+_gr.status))); return; }
+        const bk={ id:_gj.id };
         let _gp=false, _ownerFounding=false, _gtake=0.02; try{ const _ppid=(payee&&payee.coachId)||g.owner_id; if(_ppid){ const { data: ow }=await supaClient.from('profiles').select('partner, partner_tier, founding, coach_ref_score,bankai_eligible').eq('id',_ppid).single(); _gp=!!(ow&&ow.partner); _ownerFounding=!!(ow&&ow.founding); var _gsc=(ow&&ow.coach_ref_score)||0; _gtake=_ladderRate('stripe', {partner:_epTierOf(ow), score:_gsc, bankai:!!(ow&&ow.bankai_eligible)}); } }catch(e){}
-        try{ if(bk&&bk.id) await supaClient.from('gym_bookings').update({gym_keep_pct:((typeof _gymOwnerPartner!=='undefined'&&_gymOwnerPartner)||(typeof _gp!=='undefined'&&_gp))?0.99:((typeof _ownerScore!=='undefined'&&_ownerScore>=10)?0.98:((typeof _ownerScore!=='undefined'&&_ownerScore>=3)?0.97:0.965))}).eq('id',bk.id); }catch(e){}
         const url='/api/pay?type=gym&guest=1&take='+_gtake+'&founding='+(_ownerFounding?1:0)+'&token='+encodeURIComponent(tok)+'&gymAccount='+encodeURIComponent(payee.account)+'&gymName='+encodeURIComponent(g.name||'')+'&className='+encodeURIComponent(cls)+'&amount='+amt+'&currency='+cur+'&bookingId='+encodeURIComponent(bk.id)+'&payee='+encodeURIComponent(payee.name||'')+'&level='+encodeURIComponent(level)+'&disc='+encodeURIComponent(disc||'')+'&partner='+(_gp?1:0)+'&gymId='+encodeURIComponent(g.id)+'&coachId='+encodeURIComponent(coach||'');
         _gLoad(_gEN?'Loading secure payment…':'Načítám zabezpečenou platbu…');
         // Host je na stránce bez appky (toast tu není): zavření i chyba se ukážou přímo na stránce.
@@ -56887,7 +56896,7 @@ async function showPaidPopup(){
         const to=(_i.value||'').trim();
         if(!to||!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)){ _m.style.color='#c00'; _m.textContent=(EN?'Enter a valid e-mail.':'Zadej platný e-mail.'); return; }
         _b.disabled=true; _b.style.opacity='.6'; _b.textContent=(EN?'Sending...':'Posílám...');
-        if(to!==email && bookingId){ try{ await supaClient.from('gym_bookings').update({ guest_email:to }).eq('id',bookingId); }catch(e){} }
+        if(to!==email && bookingId && sessionId){ try{ await fetch('/api/guest',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ action:'dropin_email', bookingId:bookingId, sessionId:sessionId, acct:gAcct||null, email:to }) }); }catch(e){} }
         try{
           await supaClient.auth.signInWithOtp({ email:to, options:{ shouldCreateUser:true, emailRedirectTo: location.origin } });
           wrap.innerHTML='<h2 style="font-size:21px;margin:0 0 8px;">'+(EN?'Check your e-mail':'Zkontroluj e-mail')+'</h2><p style="font-size:14px;line-height:1.6;color:#444;">'+(EN?('We e-mailed a 6-digit code to <b>'+escapeHtml(to)+'</b>. Enter it to create your account and start logging your stats & attendance. (Check spam too.)'):('Poslali jsme ti 6místný kód na <b>'+escapeHtml(to)+'</b>. Po zadání se ti založí účet a začnou se ti počítat statistiky a docházka. (Mrkni i do spamu.)'))+'</p>'+'<button id="gdBack" style="width:100%;margin-top:16px;padding:14px;font-size:15px;font-weight:700;color:#fff;background:#111;border:none;border-radius:10px;cursor:pointer;">'+(EN?'Go straight to registration':'Rovnou k registraci do aplikace')+'</button>';
