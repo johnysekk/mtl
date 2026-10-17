@@ -266,10 +266,13 @@ export async function founderId() {
 // refund: karta se vrací automaticky z účtu poskytovatele, převod / hotovost vrací poskytovatel
 // (dostane seznam), kurzy a poplatky organizacím vypořádá sám. fulfil: nic se nevrací, řádky
 // zůstávají (poskytovatel je splní mimo aplikaci).
-export async function settle(ent, deleteAt) {
+// opts.keepRenew: poskytovatel si automatické obnovy zákazníků nechal běžet a řeší je ve svém
+// Stripe účtu -- členství s předplatným se nevrací ani neruší, jen se odpojí od MTL (bez provize).
+export async function settle(ent, deleteAt, opts = {}) {
   // Předplatná se sesbírají PŘEDEM -- po vypořádání jsou řádky členství 'ended' a už by se nenašla.
   const subs = await subscriptionsOf(ent);
-  const items = await obligations(ent, deleteAt);
+  const keep = !!opts.keepRenew;
+  const items = (await obligations(ent, deleteAt)).filter((it) => !(keep && it.table === 'gym_memberships' && it.sub));
   const res = { card: [], bank: [], manual: [], errors: [] };
   const name = ent.name;
   for (const it of items) {
@@ -309,7 +312,14 @@ export async function settle(ent, deleteAt) {
       else if (it.table === 'gym_memberships') await patch(`gym_memberships?id=eq.${q(it.rowId)}`, { status: 'ended', cancelled_at: nowIso, period_end: new Date(deleteAt).toISOString() });
     } catch (e) { console.error('[entity-close] row', key, e.message); }
   }
-  // Předplatná končí hned (obnova už byla vypnutá při žádosti).
-  await cancelNow(subs);
+  // Předplatná: zrušit hned (obnova už byla vypnutá při žádosti) -- nebo, když si je poskytovatel
+  // nechal, odpojit od MTL: bez provize MTL a bez vazby na členství v appce (webhook je už nenajde).
+  if (keep) {
+    await cancelNow(subs.filter((x) => !x.studentId));
+    for (const x of subs.filter((y) => y.studentId)) {
+      try { if (stripe && x.acct) await stripe.subscriptions.update(x.sub, { application_fee_percent: 0 }, { stripeAccount: x.acct }); } catch (e) { console.error('[entity-close] detach fee', x.sub, e.message); }
+      try { if (x.membership) await patch(`gym_memberships?id=eq.${q(x.membership)}`, { stripe_subscription: null, status: 'ended', cancelled_at: new Date().toISOString() }); } catch (e) {}
+    }
+  } else await cancelNow(subs);
   return res;
 }

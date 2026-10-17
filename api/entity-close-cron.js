@@ -49,7 +49,8 @@ export default async function handler(req, res) {
       try {
         const ent = await loadEntity(kind, r.id); if (!ent || !ent.closingAt) continue;
         const deleteAt = new Date(ent.closingAt).getTime() + CLOSE_DAYS * DAY;
-        const res1 = await settle(ent, deleteAt);
+        const lastClose = await one(`entity_close_log?kind=eq.${kind}&entity_id=eq.${q(ent.id)}&action=eq.close&order=created_at.desc&limit=1&select=meta`);
+        const res1 = await settle(ent, deleteAt, { keepRenew: !!(lastClose && lastClose.meta && lastClose.meta.keep_renew) });
         await after(ent);
         const d = new Date(deleteAt); const dOn = `${d.getUTCDate()}. ${d.getUTCMonth() + 1}. ${d.getUTCFullYear()}`;
         await reportOwner(ent, ent.owner, res1, dOn);

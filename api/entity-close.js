@@ -75,13 +75,16 @@ async function preview(ent, me) {
     subscriptions: subs.filter((s) => !s.own && !s.platform).length, ownSubscriptions: subs.filter((s) => s.own).length };
 }
 
-async function closeOne(ent, me, mode, deleteAt, reasonKey, reason, consent, cascade) {
+async function closeOne(ent, me, mode, deleteAt, reasonKey, reason, consent, cascade, keepRenew) {
   if (ent.closingAt) return { skipped: true };
   const at = new Date().toISOString();
-  const items = await obligations(ent, deleteAt);
   const subs = await subscriptionsOf(ent);
+  // Nechat běžet automatické obnovy zákazníků (poskytovatel je řeší ve svém Stripe účtu):
+  // nevypínají se a členství s předplatným se nevrací. Platformní / vlastní předplatná končí vždy.
+  const keep = !!keepRenew && ent.kind !== 'account';
+  const items = (await obligations(ent, deleteAt)).filter((it) => !(keep && it.table === 'gym_memberships' && it.sub));
   await setState(ent, F.close(ent.kind, at, mode, reason || reasonKey || null));
-  const stopped = await setRenew(subs, true);
+  const stopped = await setRenew(keep ? subs.filter((x) => !x.studentId) : subs, true);
   await refreshEvents(ent);
   // Zákazníci: kdo má něco zaplaceného po datu výmazu, nebo běžící předplatné.
   const by = {};
@@ -99,14 +102,14 @@ async function closeOne(ent, me, mode, deleteAt, reasonKey, reason, consent, cas
         ? ` What you paid for after that date (${what}) will be refunded on ${dOn} — card automatically, transfers are sent by the provider.`
         : ` What you paid for after that date (${what}) will be provided outside the app — arrange it with the provider.`) : '';
       await notify(sid,
-        `🚫 ${ent.name} ukončuje činnost v MTL — profil bude vymazán ${dOn}. Do té doby vše zaplacené platí.${tailCs}${x.sub ? ' Členství / předplatné se už automaticky neobnoví.' : ''}`,
-        `🚫 ${ent.name} is leaving MTL — the profile will be deleted on ${dOn}. Until then everything you paid for stays valid.${tailEn}${x.sub ? ' Your membership / subscription will not renew.' : ''}`,
+        `🚫 ${ent.name} ukončuje činnost v MTL — profil bude vymazán ${dOn}. Do té doby vše zaplacené platí.${tailCs}${x.sub ? (keep ? ` Členství / předplatné se dál obnovuje — od ${dOn} ho ${ent.name} vede mimo MTL (Stripe poskytovatele).` : ' Členství / předplatné se už automaticky neobnoví.') : ''}`,
+        `🚫 ${ent.name} is leaving MTL — the profile will be deleted on ${dOn}. Until then everything you paid for stays valid.${tailEn}${x.sub ? (keep ? ` Your membership / subscription keeps renewing — from ${dOn} the provider runs it outside MTL (their own Stripe).` : ' Your membership / subscription will not renew.') : ''}`,
         { kind: 'provider_closing', go: 'bookings', entity_kind: ent.kind, entity_id: ent.id, delete_on: dOn, mode });
     }
   }
   await log({ kind: ent.kind, entity_id: String(ent.id), user_id: me, action: 'close', mode, reason_key: reasonKey || null, reason: reason || null,
     consent_text: consent || null, delete_on: new Date(deleteAt).toISOString().slice(0, 10),
-    meta: { subs: stopped.map((s) => ({ sub: s.sub, acct: s.acct || null, membership: s.membership || null })), students: Object.keys(by), cascade: !!cascade, at,
+    meta: { subs: stopped.map((s) => ({ sub: s.sub, acct: s.acct || null, membership: s.membership || null })), students: Object.keys(by), cascade: !!cascade, at, keep_renew: keep,
       summary: summarize(items) } });
   return { items, stopped: stopped.length, notified: Object.keys(by).length };
 }
@@ -181,15 +184,16 @@ export default async function handler(req, res) {
       if (!mode && pv.summary.count) return res.status(400).json({ error: 'Vyber, jak naložit s tím, co je zaplacené po datu výmazu.' });
       const deleteAt = Date.now() + CLOSE_DAYS * DAY;
       const m = mode || 'fulfil';
+      const keepRenew = b.keep_renew === true;
       const out = { entities: [] };
       if (kind === 'account') {
         for (const x of await ownedEntities(me)) {
           const e = await loadEntity(x.kind, x.id); if (!e) continue;
-          out.entities.push(Object.assign({ kind: e.kind, name: e.name }, await closeOne(e, me, m, deleteAt, reasonKey, reason, consent, true)));
+          out.entities.push(Object.assign({ kind: e.kind, name: e.name }, await closeOne(e, me, m, deleteAt, reasonKey, reason, consent, true, keepRenew)));
         }
-        await closeOne(ent, me, m, deleteAt, reasonKey, reason, consent, false);
+        await closeOne(ent, me, m, deleteAt, reasonKey, reason, consent, false, false);
       } else {
-        out.entities.push(Object.assign({ kind, name: ent.name }, await closeOne(ent, me, m, deleteAt, reasonKey, reason, consent, false)));
+        out.entities.push(Object.assign({ kind, name: ent.name }, await closeOne(ent, me, m, deleteAt, reasonKey, reason, consent, false, keepRenew)));
       }
       const dOn = dCz(deleteAt);
       // Zakladatel: důvod a proklik na uživatele -- ať stihne zavolat dřív, než se profil smaže.
@@ -204,11 +208,12 @@ export default async function handler(req, res) {
       // E-mail poskytovateli: datum, co se stane a jak to zrušit.
       try {
         const bankL = (pv.items || []).filter((i) => i.method === 'bank');
-        const html = para(`Požádal(a) jsi o výmaz: <b>${esc(KIND_CS[kind])}${kind !== 'account' ? ' „' + esc(ent.name) + '"' : ''}</b>. Už teď je skrytý všem a nic nového se na něm neprodá. <b>Vymaže se ${esc(dOn)}</b>.`)
+        const html = para(`Požádal(a) jsi o výmaz: <b>${esc(KIND_CS[kind])}${kind !== 'account' ? ' „' + esc(ent.name) + '"' : ''}</b>. Už teď je ${kind === 'account' ? 'skrytý všem' : 'profil skrytý ve vyhledávání'} a nic nového se na něm neprodá. <b>Vymaže se ${esc(dOn)}</b>.`)
           + para('Do té doby to jde kdykoli zrušit jedním klikem v appce (proužek nahoře). Zaplacené rezervace v těchto 30 dnech normálně dojedou — odučit, odbavit, případně zrušit s vrácením peněz.')
           + para(m === 'refund'
             ? `Co platí až po datu výmazu, se ${esc(dOn)} vrátí zákazníkům (100 % nevyčerpané části): kartou automaticky z tvého Stripe účtu${bankL.length ? ', převody a hotovost vrátíš sám — seznam ti přijde v den výmazu' : ''}.`
             : 'Co platí až po datu výmazu, splníš zákazníkům mimo aplikaci — peníze se nevrací. Zákazníci o tom dostali zprávu.')
+          + (keepRenew && pv.subscriptions ? para(`Automatické obnovy zákazníků jsi nechal(a) běžet: ${esc(dOn)} se předplatná odpojí od MTL (bez provize MTL a bez dokladů z MTL) a dál je spravuješ sám ve svém Stripe účtu.`) : (pv.subscriptions ? para('Automatické obnovy členství zákazníků jsou vypnuté — zaplacené období normálně doběhne.') : ''))
           + para('Doklady, transakce, souhlasy a historie docházky zůstávají uložené, jak ukládá zákon.')
           + button(APP_URL + '/?go=closing', 'Otevřít appku');
         await mailOwner(me, `Žádost o výmaz — ${dOn}`, html);
