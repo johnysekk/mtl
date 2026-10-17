@@ -67,6 +67,7 @@ async function osmSearch(q, o, base, key) {
   const p = new URLSearchParams({ format: 'json', addressdetails: '1', limit: String(o.limit), 'accept-language': o.lang, q });
   if (o.cc) p.set('countrycodes', o.cc);
   if (o.kind === 'place') p.set('featureType', 'settlement');
+  if (o.kind === 'city') p.set('featureType', 'city');
   if (key) p.set('key', key);
   if (!key) await nomThrottle();
   const r = await fetch(`${base}/search?${clean(p)}`, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
@@ -98,14 +99,21 @@ async function osmReverse(lat, lon, o, base, key) {
 const PH_PREC = { city: 'city', district: 'district', locality: 'district', county: 'region', state: 'region', country: 'country', street: 'street', house: 'address' };
 async function photonPlaces(q, o) {
   const p = new URLSearchParams({ q, limit: String(Math.min(20, o.limit * 3)) });
-  ['city', 'district', 'locality'].forEach((l) => p.append('layer', l));
+  (o.kind === 'city' ? ['city'] : ['city', 'district', 'locality']).forEach((l) => p.append('layer', l));
   if (['en', 'de', 'fr', 'it'].includes(o.lang)) p.set('lang', o.lang);   // prázdné = místní názvy
   // Bez filtru země u Photonu: přednost dostanou místa blízko člověka, cizí země se vyřadí níž.
   if (o.near) { p.set('lat', String(o.near.lat)); p.set('lon', String(o.near.lng)); }
   const r = await fetch(`https://photon.komoot.io/api/?${clean(p)}`, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
   if (!r.ok) { const e = new Error('geocoder_unavailable'); e.status = r.status; throw e; }
   const d = await r.json();
-  return ((d && d.features) || []).map((f) => {
+  // Jen skutečná sídla a jejich části -- ne „Ostrava Business Park" (průmyslová zóna) ani pivovar.
+  const PLACE_OK = ['city', 'town', 'village', 'hamlet', 'municipality', 'suburb', 'quarter', 'neighbourhood', 'borough', 'city_district', 'district'];
+  return ((d && d.features) || []).filter((f) => {
+    const pr = f.properties || {};
+    if (pr.osm_key === 'place') return PLACE_OK.includes(String(pr.osm_value || ''));
+    if (pr.osm_key === 'boundary') return pr.osm_value === 'administrative';
+    return false;
+  }).map((f) => {
     const pr = f.properties || {}, c = (f.geometry && f.geometry.coordinates) || [];
     const t = String(pr.type || '').toLowerCase();
     const isCity = t === 'city';
@@ -120,7 +128,7 @@ async function photonPlaces(q, o) {
 }
 async function liqAutocomplete(q, o) {
   const p = new URLSearchParams({ key: process.env.LOCATIONIQ_KEY, q, limit: String(Math.min(20, o.limit)), 'accept-language': o.lang, dedupe: '1',
-    tag: 'place:city,place:town,place:village,place:hamlet,place:suburb,place:quarter,place:neighbourhood,place:borough' });
+    tag: o.kind === 'city' ? 'place:city,place:town,place:village' : 'place:city,place:town,place:village,place:hamlet,place:suburb,place:quarter,place:neighbourhood,place:borough' });
   if (o.cc) p.set('countrycodes', o.cc);
   const r = await fetch(`https://api.locationiq.com/v1/autocomplete?${clean(p)}`, { headers: { Accept: 'application/json' } });
   if (!r.ok) { const e = new Error('geocoder_unavailable'); e.status = r.status; throw e; }
@@ -160,6 +168,7 @@ async function mbSearch(q, o) {
   const p = new URLSearchParams({ q, access_token: process.env.MAPBOX_TOKEN, limit: String(Math.min(10, o.limit)), language: o.lang, autocomplete: 'true' });
   if (o.cc) p.set('country', o.cc);
   if (o.kind === 'place') p.set('types', 'place,locality,neighborhood,postcode');
+  if (o.kind === 'city') p.set('types', 'place');
   if (process.env.MAPBOX_PERMANENT === '1') p.set('permanent', 'true');
   const r = await fetch(`https://api.mapbox.com/search/geocode/v6/forward?${clean(p)}`);
   if (!r.ok) { const e = new Error('geocoder_unavailable'); e.status = r.status; throw e; }
@@ -233,7 +242,7 @@ export async function geoSearch(q, o = {}) {
   const p = providerName();
   let rows;
   // Našeptávač míst: služba s vyhledáváním podle začátku slova; když selže, běžné hledání.
-  if (opt.kind === 'place' && (p === 'nominatim' || p === 'locationiq') && process.env.GEO_PLACE_AUTOCOMPLETE !== 'off') {
+  if ((opt.kind === 'place' || opt.kind === 'city') && (p === 'nominatim' || p === 'locationiq') && process.env.GEO_PLACE_AUTOCOMPLETE !== 'off') {
     try {
       const ac = p === 'locationiq' ? await liqAutocomplete(q, opt) : await photonPlaces(q, opt);
       const ok = ac.filter((x) => _ccOk(x, opt.cc) && isFinite(parseFloat(x.lat)) && isFinite(parseFloat(x.lon))).slice(0, opt.limit);

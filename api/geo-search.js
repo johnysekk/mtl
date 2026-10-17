@@ -46,7 +46,8 @@ export default async function handler(req, res) {
   // se nevrátí vůbec. Bere i seznam oddělený čárkou („cz,sk").
   const cc = String((req.query && req.query.cc) || '')
     .toLowerCase().replace(/[^a-z,]/g, '').slice(0, 64);
-  const kind = (req.query && req.query.kind) === 'place' ? 'place' : null;
+  // kind=place: obce i jejich části; kind=city: jen obce (části se pak vyberou z /api/geo-districts).
+  const kind = ['place', 'city'].includes(req.query && req.query.kind) ? req.query.kind : null;
   const nlat = parseFloat(req.query && req.query.lat), nlng = parseFloat(req.query && req.query.lon);
   const near = (isFinite(nlat) && isFinite(nlng)) ? { lat: nlat, lng: nlng } : null;
 
