@@ -7036,18 +7036,50 @@ function _entHidden(kind, r){
   if(kind==='gym') return !!(r.deleted_at||r.paused_at||r.suspended||r.account_suspended);
   return !!(r.deleted_at||r.paused_at||r.account_suspended);
 }
+// Stav skrytého profilu pro odznak v decku (vidí ho jen majitel, tým a zakladatel):
+// window._hidState['gym:<id>'] = 'closing' | 'paused' | 'mtl'.
+const _HIDE_SEL={ coach:'id,deleted_at,coach_closing_at,coach_paused_at,deactivated_at,account_suspended', gym:'id,deleted_at,paused_at,suspended,account_suspended', org:'id,deleted_at,paused_at,account_suspended' };
+function _hidStateOf(kind, r){
+  if(!r) return null;
+  if(r.deleted_at || (kind==='coach' && r.coach_closing_at)) return 'closing';
+  if(r.paused_at || (kind==='coach' && (r.coach_paused_at || r.deactivated_at))) return 'paused';
+  if(r.account_suspended || (kind==='gym' && r.suspended)) return 'mtl';
+  return null;
+}
 async function _hiddenIds(kind, ids){
   const out=new Set(); ids=[...new Set((ids||[]).filter(Boolean).map(String))];
+  window._hidState=window._hidState||{};
   for(let i=0;i<ids.length;i+=150){
-    try{ const r=await supaClient.from(_HIDE_SRC[kind]).select('id').in('id', ids.slice(i,i+150)).or(_HIDE_OR[kind]); (r.data||[]).forEach(function(x){ out.add(String(x.id)); }); }catch(e){}
+    try{ const r=await supaClient.from(_HIDE_SRC[kind]).select(_HIDE_SEL[kind]).in('id', ids.slice(i,i+150)).or(_HIDE_OR[kind]);
+      (r.data||[]).forEach(function(x){ out.add(String(x.id)); window._hidState[kind+':'+x.id]=_hidStateOf(kind, x); }); }catch(e){}
   }
   return out;
 }
+// Kdo skrytý profil v decku vidí (s odznakem): zakladatel; u klubu majitel, spolumajitel a tým;
+// u kouče on sám.
+function _seesHidden(kind, r){
+  try{
+    if(!currentUser || !r) return false;
+    if(currentUser.role==='founder' || currentUser.id===FOUNDER_UUID) return true;
+    const me=String(currentUser.id);
+    if(kind==='coach') return String(r.id||r.profileId)===me;
+    if(kind==='gym') return String(r.owner_id||'')===me || (window._myGyms||[]).some(function(x){ return String(x.id)===String(r.id); })
+      || !!(window._myTeamGymIds && window._myTeamGymIds.has(String(r.id)));
+  }catch(e){}
+  return false;
+}
+async function _loadMyTeamGymIds(){
+  if(!currentUser){ window._myTeamGymIds=new Set(); return; }
+  try{ const { data }=await supaClient.from('gym_coaches').select('gym_id').eq('coach_id', currentUser.id).eq('status','active');
+    window._myTeamGymIds=new Set((data||[]).map(function(x){ return String(x.gym_id); })); }catch(e){ window._myTeamGymIds=window._myTeamGymIds||new Set(); }
+}
 async function _dropHidden(kind, rows, key){
-  key=key||'id'; rows=(rows||[]).filter(function(r){ return !_entHidden(kind, r); });
+  key=key||'id';
+  window._hidState=window._hidState||{};
+  rows=(rows||[]).filter(function(r){ const st=_hidStateOf(kind, r); if(st) window._hidState[kind+':'+r[key]]=st; return !st || _seesHidden(kind, r); });
   if(!rows.length) return rows;
   const h=await _hiddenIds(kind, rows.map(function(r){ return r[key]; }));
-  return h.size ? rows.filter(function(r){ return !h.has(String(r[key])); }) : rows;
+  return h.size ? rows.filter(function(r){ return !h.has(String(r[key])) || _seesHidden(kind, r); }) : rows;
 }
 async function loadCoaches() {
   try{ await _loadBlockedBy(); }catch(e){}
@@ -7091,6 +7123,10 @@ async function loadCoaches() {
 
   if (error) { console.error('Supabase error:', error); toast(L('⚠️ Chyba načítání')); return; }
   try{ data = await _dropHidden('coach', data||[]); }catch(e){}
+  // Vlastní pozastavený / rušený profil kouče vidí kouč v decku dál (s odznakem) -- dotazy výš ho vynechají.
+  try{ if(currentUser && currentUser.coach_status==='approved' && !(data||[]).some(function(r){ return String(r.id)===String(currentUser.id); })){
+    const { data:_me }=await supaClient.from('profiles_pub').select('*').eq('id', currentUser.id).limit(1);
+    const _mr=(_me||[])[0]; const _st=_hidStateOf('coach', _mr); if(_mr && _st){ window._hidState=window._hidState||{}; window._hidState['coach:'+_mr.id]=_st; data=(data||[]).concat([_mr]); } } }catch(e){}
 
   // Sjednoceno s klubem a organizací: jedna podmínka canSell (viz _sellMissing).
   // Stará verze hlídala jen výplatní kanál a fakturační údaje ignorovala.
@@ -8251,9 +8287,21 @@ async function _reportGymDemand(discCsv, silent, commit, form){
     }
 
     if(!silent){
-      toast(LANG==='en'
-        ? '\u2713 Thanks! We will focus on adding more gyms in your area \u2014 you will get a notification when a club teaching your sport joins.'
-        : '\u2713 D\u00edky! Zam\u011b\u0159\u00edme se na p\u0159id\u00e1n\u00ed dal\u0161\u00edch klub\u016f ve tv\u00e9m okol\u00ed \u2014 a\u017e p\u0159ibude nov\u00fd klub s tv\u00fdm sportem, d\u00e1me ti v\u011bd\u011bt.', 1);
+      // Poděkování na konci: co MTL udělá a že to nebude hned.
+      try{
+        const EN=LANG==='en';
+        const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;z-index:100090;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:18px;';
+        ov.innerHTML='<div style="background:#fff;border-radius:18px;max-width:400px;width:100%;padding:24px 22px;font-family:\'DM Sans\';text-align:center;">'
+          +'<div style="font-size:40px;margin-bottom:6px;">🙏</div>'
+          +'<div style="font-size:19px;font-weight:800;color:var(--dark);margin-bottom:10px;">'+(EN?'Thank you!':'Díky!')+'</div>'
+          +'<div style="font-size:14px;color:var(--mid);line-height:1.6;margin-bottom:16px;">'+(EN
+            ?'MTL will do its best to bring a club with your sport to your area — we reach out to clubs and show them how many people nearby are looking. It will not happen overnight, it takes time. As soon as a club joins near you, we will let you know.'
+            :'MTL udělá maximum pro to, aby ti klub s tvým sportem přivedlo do okolí — oslovujeme kluby a ukazujeme jim, kolik lidí v okolí hledá. Nebude to ale hned, chce to čas. Jakmile nějaký klub v okolí přibude, dáme ti vědět.')+'</div>'
+          +'<button id="_dmOk" style="width:100%;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:11px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:inherit;">OK</button></div>';
+        document.body.appendChild(ov);
+        ov.onclick=function(e){ if(e.target===ov) ov.remove(); };
+        ov.querySelector('#_dmOk').onclick=function(){ ov.remove(); };
+      }catch(e){}
       // Fire-and-forget: crossing a threshold notifies the founder and the people waiting, and
       // must never block or fail the person's own submission.
       try{ if(lat!=null && lng!=null) fetch('/api/demand-threshold?lat='+lat+'&lng='+lng); }catch(e){}
@@ -9172,7 +9220,11 @@ function fillCard(p, c){
   // Odznak: zakladatel > nový v MTL > úroveň. (Odznak „MTL Verified" zrušen -- říkal jen, že si
   // kouč zvolil platbu kartou, a v decku vypadal jako známka kvality.)
   fillCardLevel(p, c.profileId, 'coach'); _cardOrgs(p, null);
-  if(c.profileId===FOUNDER_UUID) _cardBadge(p, '👑 MTL Founder', 'linear-gradient(135deg,#C9A227,#F4D87A)', '#2a2000');
+  const _chs=(window._hidState||{})['coach:'+(c.profileId||c.id)];
+  try{ const _card=$(p+'Img') && $(p+'Img').closest('.card'); if(_card) _card.style.filter=(_chs==='closing'||_chs==='paused')?'grayscale(1)':''; }catch(e){}
+  if(_chs==='closing') _cardBadge(p, EN?'Leaving MTL — only you see it':'Na odchodu — vidíš jen ty', '#8B1E1E', '#fff');
+  else if(_chs==='paused') _cardBadge(p, EN?'Paused — only you see it':'Pozastaveno — vidíš jen ty', '#1B3A63', '#fff');
+  else if(c.profileId===FOUNDER_UUID) _cardBadge(p, '👑 MTL Founder', 'linear-gradient(135deg,#C9A227,#F4D87A)', '#2a2000');
   else if(typeof _isNewProvider==='function' && _isNewProvider(c.createdAt)) _cardBadge(p, EN?'New on MTL':'Nově v MTL', '#16a34a', '#fff');
   else _cardBadge(p, '');
 
@@ -9632,7 +9684,7 @@ async function loadMoreGyms(){
     const have = new Set(GYMS.map(x=>x.id));
     // Stejná pravidla jako první stránka -- dřív další stránky pouštěly do decku i klub bez plateb.
     try{ const _ids=data.map(function(x){ return x.id; }); const { data:_oc }=await supaClient.from('gym_cohorts').select('gym_id').in('gym_id',_ids).eq('status','open'); const _os=new Set((_oc||[]).map(function(x){ return String(x.gym_id); })); data.forEach(function(x){ if(_os.has(String(x.id))) x._openCourse=true; }); }catch(e){}
-    const add = data.filter(g=>!g.suspended && !g.deleted_at && !g.paused_at && !have.has(g.id) && canSell(g,'gym'));
+    const add = data.filter(g=>{ if(g.suspended || have.has(g.id) || !canSell(g,'gym')) return false; const _st=_hidStateOf('gym', g); if(_st==='closing'||_st==='paused'){ window._hidState=window._hidState||{}; window._hidState['gym:'+g.id]=_st; return _seesHidden('gym', g); } return true; });
     if(add.length){
       GYMS = GYMS.concat(add.map(_mapGymRow));
       try{ if(typeof init==='function') init(); }catch(e){}
@@ -9731,7 +9783,10 @@ async function ensureGymsLoaded(force){
     // Klub bez možnosti zaplatit do decku nepatří -- student by doklikal k rezervaci
     // a nedostal se dál.
     try{ const _ids=(data||[]).map(function(x){ return x.id; }); if(_ids.length){ const { data:_oc }=await supaClient.from('gym_cohorts').select('gym_id').in('gym_id',_ids).eq('status','open'); const _os=new Set((_oc||[]).map(function(x){ return String(x.gym_id); })); (data||[]).forEach(function(x){ if(_os.has(String(x.id))) x._openCourse=true; }); } }catch(e){}
-    const gyms=(data||[]).filter(g=>!g.suspended && !g.deleted_at && !g.paused_at && canSell(g,'gym'));
+    // Rušený / pozastavený klub: jen majitel, spolumajitel, tým a zakladatel -- s odznakem.
+    try{ await _loadMyTeamGymIds(); }catch(e){}
+    window._hidState=window._hidState||{};
+    const gyms=(data||[]).filter(g=>{ if(g.suspended || !canSell(g,'gym')) return false; const _st=_hidStateOf('gym', g); if(_st==='closing'||_st==='paused'){ window._hidState['gym:'+g.id]=_st; return _seesHidden('gym', g); } return true; });
     if(!data || data.length < _GYM_PAGE) _gymExhausted = true;
     GYMS=gyms.map(_mapGymRow);
     try{ const _oids=[...new Set(gyms.map(x=>x.owner_id).filter(Boolean))]; if(_oids.length){ const { data:_ow } = await supaClient.from('profiles').select('id,partner,partner_tier').in('id',_oids); const _opm={}; (_ow||[]).forEach(o=>_opm[o.id]=_epTierOf(o)); GYMS.forEach(c=>{ if(c.ownerId) c.ownerPartner=_opm[c.ownerId]||false; });   /* stupeň EP majitele (klíč) */ } }catch(e){}
@@ -10120,8 +10175,12 @@ function fillGymCard(p,c){
   // trénink zdarma (nejsilnější důvod kliknout; nárok se prověřuje až při rezervaci) > nový > úroveň.
   fillCardLevel(p, c.id, 'gym');
   const _gsrc=(c.g||c); const _tc=(typeof gymTrialCount==='function')?gymTrialCount(_gsrc):0;
-  try{ const _card=imgEl.closest('.card'); if(_card) _card.style.filter=(_gsrc&&_gsrc.account_suspended)?'grayscale(1)':''; }catch(e){}
-  if(_gsrc && _gsrc.account_suspended) _cardBadge(p, EN?'Suspended — hidden from students':'Pozastaven — v appce není vidět', '#b91c1c', '#fff');
+  const _hst=_hidStateOf('gym', _gsrc);
+  try{ const _card=imgEl.closest('.card'); if(_card) _card.style.filter=(_gsrc&&(_gsrc.account_suspended||_hst==='closing'||_hst==='paused'))?'grayscale(1)':''; }catch(e){}
+  // Rušený / pozastavený klub vidí v decku jen majitel, tým a zakladatel -- odznak říká proč.
+  if(_hst==='closing'){ const _do=new Date(new Date(_gsrc.deleted_at).getTime()+30*864e5); _cardBadge(p, (EN?'Leaving — deleted on ':'Na odchodu — smaže se ')+_do.toLocaleDateString(EN?'en-GB':'cs-CZ')+(EN?' · only you and the team see it':' · vidíš jen ty a tým'), '#8B1E1E', '#fff'); }
+  else if(_hst==='paused') _cardBadge(p, EN?'Paused — only you and the team see it':'Pozastaveno — vidíš jen ty a tým', '#1B3A63', '#fff');
+  else if(_gsrc && _gsrc.account_suspended) _cardBadge(p, EN?'Suspended — hidden from students':'Pozastaven — v appce není vidět', '#b91c1c', '#fff');
   else if(_tc>0) _cardBadge(p, EN?((_tc===1?'1st class':_tc+' classes')+' free'):((_tc===1?'1. trénink':_tc+' tréninky')+' zdarma'), '#FFD86B', '#3B2A00');
   else if(typeof _isNewProvider==='function' && _isNewProvider(c.g && c.g.created_at)) _cardBadge(p, EN?'New on MTL':'Nově v MTL', '#16a34a', '#fff');
   else _cardBadge(p, '');
@@ -16253,7 +16312,7 @@ async function openGymProfile(g){
     // nebo docházku, profil otevře (zaplacené dojede), jen se dozví, že nic nového nekoupí.
     // Stejně i klub pozastavený administrátorem MTL nebo kvůli neuhrazené provizi (account_suspended).
     if(g && (g.deleted_at || g.paused_at || g.account_suspended || g.suspended)){
-      const _mine=!!(_me && (String(g.owner_id)===String(_me) || (window._myGyms||[]).some(function(x){ return String(x.id)===String(_gid); })));
+      const _mine=!!(_me && (String(g.owner_id)===String(_me) || (window._myGyms||[]).some(function(x){ return String(x.id)===String(_gid); }) || (window._myTeamGymIds && window._myTeamGymIds.has(String(_gid)))));
       const _rel=!!((_pMemb && _pMemb.data && _pMemb.data.length) || (_pAtt && _pAtt.count));
       // Profil je skrytý všem kromě majitele a týmu. Zákazník vidí, co má zaplacené, v Nadcházejících
       // a v Permanentkách / Členství -- profil k tomu nepotřebuje.
@@ -29127,6 +29186,37 @@ async function _openAdminEntity(kind, id, name){
     else { const { data:o }=await supaClient.from('organizations').select('*').eq('id',id).maybeSingle(); if(o && typeof openAdminOrgDetail==='function') openAdminOrgDetail(o); }
   }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
 }
+// UKONČENÍ SPOLUPRÁCE (poskytovateli) a UPOZORNĚNÍ NA NEZÁKONNOU NABÍDKU (kupujícím, DSA čl. 32):
+// celé znění z notifikace -- proč, kdo je obchodník, co dělat.
+function _showMtlNotice(k, d){
+  const EN=LANG==='en'; d=d||{};
+  const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;z-index:100080;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:18px;';
+  const row=function(t,v){ return v?('<div style="margin-bottom:12px;"><div style="font-size:11px;font-weight:800;color:var(--light);letter-spacing:.04em;text-transform:uppercase;margin-bottom:3px;">'+t+'</div><div style="font-size:14px;color:var(--dark);line-height:1.55;white-space:pre-wrap;">'+escapeHtml(v)+'</div></div>'):''; };
+  let h='';
+  if(k==='mtl_terminated'){
+    let when=''; try{ if(d.at) when=new Date(d.at).toLocaleString(EN?'en-GB':'cs-CZ',{ day:'numeric', month:'numeric', year:'numeric', hour:'2-digit', minute:'2-digit' }); }catch(e){}
+    h='<div style="font-size:18px;font-weight:800;margin-bottom:12px;">⛔ '+(EN?'MTL ended the cooperation':'MTL ukončilo spolupráci')+'</div>'
+      +row(EN?'What':'Co', (d.name||'')+(when?(' · '+when):''))+row(EN?'Reason':'Důvod', d.reason||'—')
+      +row(EN?'Prepaid items':'Zaplacené dopředu', d.mode==='fulfil'?(EN?'Provide them to customers outside the app.':'Splň je zákazníkům mimo aplikaci.'):(EN?'Card refunds went out automatically; refund transfers and cash yourself — the list is in the e-mail.':'Kartou se vrátilo automaticky; převody a hotovost vrať sám — seznam máš v e-mailu.'))
+      +'<div style="font-size:12.5px;color:var(--mid);line-height:1.55;background:var(--surf);border-radius:11px;padding:10px 12px;margin-bottom:12px;">'+(EN?'Receipts, transactions and history stay stored. If you disagree, contact Support — we will review the decision.':'Doklady, transakce a historie zůstávají uložené. Pokud nesouhlasíš, napiš Podpoře — rozhodnutí přezkoumáme.')+'</div>';
+  } else {
+    const t=d.trader||{};
+    h='<div style="font-size:18px;font-weight:800;margin-bottom:12px;">⚠️ '+(EN?'Important notice about a purchase':'Důležité upozornění k nákupu')+'</div>'
+      +row(EN?'What was illegal':'Co bylo v rozporu s právem', d.illegal||'')
+      +row(EN?'Trader':'Obchodník (poskytovatel)', [t.name||d.name||'', t.ico?((EN?'ID ':'IČO ')+t.ico):'', t.address||''].filter(Boolean).join(', '))
+      +row(EN?'What you can do':'Co můžeš dělat', d.redress||'')
+      +'<div style="font-size:11.5px;color:var(--light);line-height:1.5;margin-bottom:12px;">'+(EN?'Everyone who bought from this trader through MTL in the last 6 months gets this notice (EU Digital Services Act, Art. 32).':'Toto upozornění dostávají všichni, kdo si u tohoto obchodníka přes MTL koupili něco za posledních 6 měsíců (Akt o digitálních službách EU, čl. 32).')+'</div>';
+  }
+  ov.innerHTML='<div style="background:#fff;border-radius:16px;max-width:460px;width:100%;padding:22px;font-family:\'DM Sans\';max-height:88vh;overflow-y:auto;box-sizing:border-box;">'+h
+    +'<div style="display:flex;gap:8px;"><button id="mnSup" style="flex:1;padding:11px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-weight:800;cursor:pointer;font-family:inherit;">'+(EN?'Contact Support':'Napsat Podpoře')+'</button>'
+    +(k==='dsa_illegal_notice'?('<button id="mnBk" style="flex:1;padding:11px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'My purchases':'Moje nákupy')+'</button>'):'')
+    +'<button id="mnOk" style="flex:.6;padding:11px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:inherit;">OK</button></div></div>';
+  document.body.appendChild(ov);
+  ov.onclick=function(e){ if(e.target===ov) ov.remove(); };
+  ov.querySelector('#mnOk').onclick=function(){ ov.remove(); };
+  ov.querySelector('#mnSup').onclick=function(){ ov.remove(); try{ openSupport(); }catch(e){} };
+  const bk=ov.querySelector('#mnBk'); if(bk) bk.onclick=function(){ ov.remove(); try{ openSheet('shBookings'); if(typeof loadBookings==='function') loadBookings('upcoming'); }catch(e){} };
+}
 // Vysvětlení ručního pozastavení: kdo, kdy, proč a jak ho zrušit (z notifikace, e-mailu i pruhu).
 function _showManualSuspension(d){
   const EN=LANG==='en'; d=d||{};
@@ -29165,6 +29255,73 @@ function _admSuspHtml(kind, row){
 function _admSuspWire(box, after){
   try{ (box||document).querySelectorAll('.admSuspBtn').forEach(function(b){ b.onclick=function(){ _admSuspDialog(b.dataset.kind, b.dataset.id, b.dataset.name, b.dataset.on==='1', after); }; }); }catch(e){}
 }
+// DSA čl. 32: upozornění kupujícím za posledních 6 měsíců (nezákonná nabídka). Do dialogu
+// pozastavení i ukončení spolupráce. Pošle server (_dsa-inform.js): notifikace + e-mail.
+function _dsaNoticeBlock(){
+  const EN=LANG==='en';
+  const TA='width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:13.5px;font-family:inherit;resize:vertical;margin-bottom:8px;';
+  return '<div style="background:#FFF8E6;border:1px solid #F0E0A8;border-radius:12px;padding:10px 12px;margin:2px 0 12px;">'
+    +'<label style="display:flex;gap:8px;align-items:flex-start;font-size:13px;font-weight:800;color:var(--dark);cursor:pointer;line-height:1.4;"><input type="checkbox" id="dsaOn" style="margin-top:2px;width:16px;height:16px;flex-shrink:0;"><span>'+(EN?'Inform buyers of the last 6 months about an illegal offer (DSA Art. 32)':'Upozornit kupující za posledních 6 měsíců na nezákonnou nabídku (DSA čl. 32)')+'</span></label>'
+    +'<div id="dsaBox" style="display:none;margin-top:9px;">'
+      +'<div style="font-size:11.5px;color:var(--mid);line-height:1.5;margin-bottom:8px;">'+(EN?'Mandatory once MTL learns that an illegal product or service was offered. Everyone with a contact gets a notification and an e-mail with what was illegal, who the trader is (from the receipt) and what they can do.':'Povinné, jakmile se MTL dozví, že se nabízel nezákonný produkt nebo služba. Každý, na koho máme kontakt, dostane notifikaci i e-mail: co bylo v rozporu s právem, kdo je obchodník (z dokladu) a co může dělat.')+'</div>'
+      +'<textarea id="dsaIllegal" rows="2" maxlength="1500" style="'+TA+'" placeholder="'+(EN?'What was illegal (they will see it)':'Co bylo v rozporu s právem (uvidí to)')+'"></textarea>'
+      +'<textarea id="dsaRedress" rows="3" maxlength="1500" style="'+TA+'">'+escapeHtml(EN?'Contact the trader and ask for a refund or withdraw from the contract. If you paid by card, you can ask your bank for a chargeback. You can also turn to the consumer protection authority (in Czechia: Česká obchodní inspekce, coi.cz) or write to MTL Support.':'Obrať se na obchodníka a požádej o vrácení peněz nebo od smlouvy odstup. Když jsi platil(a) kartou, můžeš u své banky požádat o vrácení platby (chargeback). Můžeš se obrátit i na Českou obchodní inspekci (coi.cz) nebo napsat Podpoře MTL.')+'</textarea>'
+    +'</div></div>';
+}
+function _dsaNoticeRead(ov){
+  const on=ov.querySelector('#dsaOn'); if(!on || !on.checked) return null;
+  const il=(ov.querySelector('#dsaIllegal').value||'').trim(), rd=(ov.querySelector('#dsaRedress').value||'').trim();
+  if(!il || !rd){ toast(LANG==='en'?'⚠️ Fill in what was illegal and what buyers can do':'⚠️ Vyplň, co bylo v rozporu s právem a co kupující můžou dělat', 1); return false; }
+  return { illegal:il, redress:rd };
+}
+function _dsaNoticeToast(d){
+  if(!d) return ''; if(d.error) return ' · DSA ⚠️ '+d.error;
+  const a=Array.isArray(d)?d:[d]; const inf=a.reduce(function(s,x){ return s+(x.informed||0)+(x.guests||0); },0), nc=a.reduce(function(s,x){ return s+(x.noContact||0); },0);
+  return (LANG==='en'?(' · buyers informed: '+inf):(' · upozornění kupujícím: '+inf))+(nc?(LANG==='en'?(' · without contact: '+nc+' — publish a public notice'):(' · bez kontaktu: '+nc+' — zveřejni oznámení')):'');
+}
+document.addEventListener('change', function(e){ if(e.target && e.target.id==='dsaOn'){ const bx=document.getElementById('dsaBox'); if(bx) bx.style.display=e.target.checked?'block':'none'; } });
+// UKONČENÍ SPOLUPRÁCE ZE STRANY MTL (api/admin-terminate.js): stejné jako výmaz na žádost, ale
+// hned a bez obnovení. Důvod povinný (poskytovatel ho dostane), vypořádání vrátit / plnit mimo
+// aplikaci, volitelně upozornění kupujícím (DSA čl. 32). Potvrzení opsáním slova UKONČIT.
+function _admTerminateDialog(kind, id, name, after){
+  const EN=LANG==='en';
+  const what=kind==='account'?(EN?('the whole account of '+name+' with all profiles'):('celý účet '+name+' se všemi profily')):((kind==='gym'?(EN?'club ':'klub '):kind==='coach'?(EN?'coach profile ':'profil kouče '):(EN?'organization ':'organizaci '))+name);
+  const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;z-index:100075;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:18px;';
+  const TA='width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:inherit;resize:vertical;margin-bottom:10px;';
+  const R=function(v,t,d,on){ return '<label style="display:flex;gap:9px;align-items:flex-start;padding:9px 10px;border:1px solid var(--border);border-radius:10px;margin-bottom:6px;cursor:pointer;"><input type="radio" name="atMode" value="'+v+'"'+(on?' checked':'')+' style="margin-top:3px;"><span><b style="font-size:13px;">'+t+'</b><br><span style="font-size:11.5px;color:var(--mid);line-height:1.45;">'+d+'</span></span></label>'; };
+  ov.innerHTML='<div style="background:#fff;border-radius:18px;max-width:500px;width:100%;padding:20px;font-family:inherit;max-height:90vh;overflow-y:auto;box-sizing:border-box;">'
+    +'<div style="font-size:17px;font-weight:800;color:#8a1c1c;margin-bottom:4px;">🗑️ '+(EN?'End cooperation: ':'Ukončit spolupráci: ')+escapeHtml(what)+'</div>'
+    +'<div style="font-size:12px;color:var(--mid);line-height:1.5;margin-bottom:12px;">'+(EN?'With immediate effect and no way back: hidden, nothing is sold, prepaid items are settled now, subscriptions end and the profile content is deleted. History (receipts, transactions, consents, attendance) stays.'+(kind==='account'?' The account loses its login.':''):'S okamžitou platností a bez možnosti obnovení: profil zmizí, nic se neprodá, zaplacené dopředu se vypořádá hned, předplatná končí a obsah profilu se vymaže. Historie (doklady, transakce, souhlasy, docházka) zůstává.'+(kind==='account'?' Účet přijde o přihlášení.':''))+'</div>'
+    +'<label style="display:block;font-size:12px;font-weight:800;color:var(--dark);margin-bottom:4px;">'+(EN?'Reason (required, they will see it)':'Důvod (povinný, uvidí ho)')+'</label>'
+    +'<textarea id="atReason" rows="3" maxlength="1000" style="'+TA+'"></textarea>'
+    +'<div style="font-size:12px;font-weight:800;color:var(--dark);margin-bottom:6px;">'+(EN?'What customers prepaid from today':'Co mají zákazníci zaplacené od dneška dál')+'</div>'
+    +R('refund', EN?'Refund 100 % of the unused part':'Vrátit 100 % nevyčerpané části', EN?'Card refunds go out now automatically from the provider\u2019s Stripe account; the provider refunds transfers and cash (gets the list).':'Kartou se vrací hned automaticky ze Stripe účtu poskytovatele, převody a hotovost vrací poskytovatel (dostane seznam).', true)
+    +R('fulfil', EN?'Provider fulfils outside the app':'Poskytovatel splní mimo aplikaci', EN?'Nothing is refunded; customers are told to arrange it with the provider.':'Nic se nevrací, zákazníci dostanou zprávu, ať se domluví s poskytovatelem.', false)
+    +'<div style="height:6px;"></div>'+_dsaNoticeBlock()
+    +'<label style="display:block;font-size:12px;font-weight:800;color:var(--dark);margin-bottom:4px;">'+(EN?'Type UKONČIT to confirm':'Pro potvrzení napiš UKONČIT')+'</label>'
+    +'<input id="atWord" autocomplete="off" style="'+TA+'">'
+    +'<div style="display:flex;gap:8px;"><button id="atCancel" style="flex:1;padding:12px;background:var(--surf);border:1px solid var(--border);border-radius:11px;font-weight:700;cursor:pointer;font-family:inherit;color:var(--dark);">'+(EN?'Back':'Zpět')+'</button>'
+    +'<button id="atGo" style="flex:1.4;padding:12px;background:#8a1c1c;color:#fff;border:none;border-radius:11px;font-weight:800;cursor:pointer;font-family:inherit;">'+(EN?'End cooperation':'Ukončit spolupráci')+'</button></div></div>';
+  document.body.appendChild(ov);
+  ov.querySelector('#atCancel').onclick=function(){ ov.remove(); };
+  ov.querySelector('#atGo').onclick=async function(){
+    const reason=(ov.querySelector('#atReason').value||'').trim();
+    if(!reason){ ov.querySelector('#atReason').focus(); toast(EN?'⚠️ The reason is required':'⚠️ Důvod je povinný', 1); return; }
+    if(String(ov.querySelector('#atWord').value||'').trim().toUpperCase()!=='UKONČIT'){ toast(EN?'⚠️ Type UKONČIT':'⚠️ Napiš UKONČIT', 1); return; }
+    const dsa=_dsaNoticeRead(ov); if(dsa===false) return;
+    const m=ov.querySelector('input[name="atMode"]:checked');
+    const bt=this; bt.disabled=true; bt.textContent='…';
+    try{
+      const t=(typeof _freshTok==='function')?await _freshTok():null;
+      const r=await fetch('/api/admin-terminate',{ method:'POST', headers:{ 'Content-Type':'application/json', Authorization:'Bearer '+(t||'') }, body:JSON.stringify({ kind:kind, id:id, reason:reason, mode:(m?m.value:'refund'), dsa:dsa||undefined }) });
+      const j=await r.json().catch(function(){ return {}; }); if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+      const rs=(j.results||[]); const c=rs.reduce(function(s,x){ return s+(x.card||0); },0), bk=rs.reduce(function(s,x){ return s+(x.bank||0); },0), er=rs.reduce(function(s,x){ return s+(x.errors||0); },0);
+      ov.remove();
+      toast((EN?'🗑️ Cooperation ended':'🗑️ Spolupráce ukončena')+(c?(' · '+(EN?'card refunds ':'vráceno kartou ')+c+'×'):'')+(bk?(' · '+(EN?'transfers for the provider ':'převodem vrací poskytovatel ')+bk+'×'):'')+(er?(' · ⚠️ '+(EN?'failed ':'nepovedlo se ')+er+'×'):'')+_dsaNoticeToast(j.dsa), 1);
+      if(after) after();
+    }catch(e){ bt.disabled=false; bt.textContent=EN?'End cooperation':'Ukončit spolupráci'; toast('⚠️ '+((e&&e.message)||''), 1); }
+  };
+}
 function _admSuspDialog(kind, id, name, isOn, after){
   const EN=LANG==='en';
   const call=async function(body){
@@ -29186,6 +29343,7 @@ function _admSuspDialog(kind, id, name, isOn, after){
     +'<textarea id="asReason" rows="3" maxlength="600" style="'+TA+'" placeholder="'+(EN?'E.g. missing details for the DAC7 report after two reminders':'Nap\u0159. chyb\u011bj\u00edc\u00ed \u00fadaje pro hl\u00e1\u0161en\u00ed DAC7 ani po dvou upom\u00ednk\u00e1ch')+'"></textarea>'
     +'<label style="display:block;font-size:12px;font-weight:800;color:var(--dark);margin-bottom:4px;">'+(EN?'How to lift the suspension (optional)':'Jak pozastaven\u00ed zru\u0161it (nepovinn\u00e9)')+'</label>'
     +'<textarea id="asHow" rows="3" maxlength="1200" style="'+TA+'" placeholder="'+(EN?'E.g. add your address and company ID in Billing details and let us know':'Nap\u0159. dopl\u0148 adresu a I\u010cO ve Faktura\u010dn\u00edch \u00fadaj\u00edch a dej n\u00e1m v\u011bd\u011bt')+'"></textarea>'
+    +_dsaNoticeBlock()
     +'<div style="display:flex;gap:8px;margin-top:4px;"><button id="asCancel" style="flex:1;padding:12px;background:var(--surf);border:1px solid var(--border);border-radius:11px;font-weight:700;cursor:pointer;font-family:inherit;color:var(--dark);">'+(EN?'Back':'Zp\u011bt')+'</button>'
     +'<button id="asGo" style="flex:1.4;padding:12px;background:#b91c1c;color:#fff;border:none;border-radius:11px;font-weight:800;cursor:pointer;font-family:inherit;">'+(EN?'Suspend':'Pozastavit')+'</button></div></div>';
   document.body.appendChild(ov);
@@ -29193,8 +29351,9 @@ function _admSuspDialog(kind, id, name, isOn, after){
   ov.querySelector('#asGo').onclick=function(){
     const reason=ov.querySelector('#asReason').value.trim(), howto=ov.querySelector('#asHow').value.trim();
     if(!reason){ ov.querySelector('#asReason').focus(); toast(EN?'\u26a0\ufe0f The reason is required':'\u26a0\ufe0f D\u016fvod je povinn\u00fd'); return; }
+    const dsa=_dsaNoticeRead(ov); if(dsa===false) return;
     const b=ov.querySelector('#asGo'); b.disabled=true; b.textContent='\u2026';
-    call({ action:'suspend', kind:kind, id:id, reason:reason, howto:howto }).then(function(){ ov.remove(); toast(EN?'\u26d4 Suspended \u2014 notification and e-mail sent':'\u26d4 Pozastaveno \u2014 notifikace i e-mail odesl\u00e1ny', 1); if(after) after(); })
+    call({ action:'suspend', kind:kind, id:id, reason:reason, howto:howto, dsa:dsa||undefined }).then(function(j){ ov.remove(); toast((EN?'\u26d4 Suspended \u2014 notification and e-mail sent':'\u26d4 Pozastaveno \u2014 notifikace i e-mail odesl\u00e1ny')+_dsaNoticeToast(j&&j.dsa), 1); if(after) after(); })
       .catch(function(e){ b.disabled=false; b.textContent=(EN?'Suspend':'Pozastavit'); toast('\u26a0\ufe0f '+e.message, 1); });
   };
 }
@@ -35448,7 +35607,7 @@ async function loadNotifications(append){
     const isCoachRefAdmin = false; /* referral EP grants removed — rewards are Shikai/Bankai */
     // beta_pending sem musí být přidané, jinak se notifikace vykreslí jako neklikatelná a obsluha
   // se vůbec nenapojí -- větev, která má otevřít admin, pak nemá kdo spustit.
-  const clickable = k==='provider_closing' || k==='provider_restored' || k==='provider_closed' || k==='entity_deleted' || k==='entity_closing_admin' || k==='account_blocked' || k==='xp_adjusted' || k==='xp_restored' || k==='dsa_received' || k==='dsa_decided' || k==='dsa_report_new' || k==='dsa_restored' || k==='dsa_restricted' || k==='pass_transfer_offer' || k==='pass_transfer_done' || k==='pass_transfer_decided' || k==='pairing_link' || k==='owner_xfer_request' || k==='owner_xfer_done' || k==='sup_paidfor' || k==='owner_xfer_declined' || k==='owner_xfer_cancelled' || k==='memb_mode_needed' || k==='dac7_data_needed' || k==='dac7_overdue' || k==='admin_suspended' || k==='admin_restored' || k==='event_cohost_invite' || k==='event_cohost_accepted' || k==='event_cohost_declined' || k==='event_cohost_left' || k==='event_cohost_removed' || k==='oss_threshold' || k==='commission_upcoming' || k==='family_payreq_offer' || k==='ref_joined' || k==='coach_ref_qualified' || k==='minor_course_req' || k==='migration_request' || k==='withdrawal_done' || k==='online_withdrawal' || k==='online_plan_new' || k==='online_piece_done' || k==='online_plan_qr' || k==='online_plan_active' || k==='withdrawal_request' || k==='minor_member_app' || k==='minor_waiver' || k==='family_request' || k==='autonomy_sunset' || k==='dropin_bank_cancelled' || k==='bug_report' || k==='milestone' || k==='address_from_club' || k==='address_request' || k==='class_cancelled' || k==='trial_booked' || k==='pis_creditor_outage' || (String(k||'').indexOf('kid_share')===0) || k==='kidxfer' || k==='kidxfer_done' || k==='kidxfer_reversed' || k==='support_ticket' || k==='class_reminder' || k==='fav_added_coach' || k==='fav_added_gym' || isCoachLessonRem || isStudResched || k==='coach_pay_ok' || k==='coach_qr_intent' || k==='qr_unconfirmed' || k==='event_qr_intent' || k==='walkin_drop' || k==='org_linked' || k==='org_accepted' || k==='org_fee' || k==='org_invite' || k==='org_fee_paid' || k==='org_join' || k==='org_fee_in' || k==='org_join_req' || k==='org_removed' || k==='org_left' || k==='org_expiring' || k==='beta_pending' || k==='came_of_age' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || k==='resched_conf' || k==='cancel_conf' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked' || k==='commission_no_card' || k==='commission_suspended' || k==='new_provider' || k==='supplier_live' || k==='supplier_ended';
+  const clickable = k==='provider_closing' || k==='provider_restored' || k==='provider_closed' || k==='entity_deleted' || k==='entity_closing_admin' || k==='mtl_terminated' || k==='dsa_illegal_notice' || k==='account_blocked' || k==='xp_adjusted' || k==='xp_restored' || k==='dsa_received' || k==='dsa_decided' || k==='dsa_report_new' || k==='dsa_restored' || k==='dsa_restricted' || k==='pass_transfer_offer' || k==='pass_transfer_done' || k==='pass_transfer_decided' || k==='pairing_link' || k==='owner_xfer_request' || k==='owner_xfer_done' || k==='sup_paidfor' || k==='owner_xfer_declined' || k==='owner_xfer_cancelled' || k==='memb_mode_needed' || k==='dac7_data_needed' || k==='dac7_overdue' || k==='admin_suspended' || k==='admin_restored' || k==='event_cohost_invite' || k==='event_cohost_accepted' || k==='event_cohost_declined' || k==='event_cohost_left' || k==='event_cohost_removed' || k==='oss_threshold' || k==='commission_upcoming' || k==='family_payreq_offer' || k==='ref_joined' || k==='coach_ref_qualified' || k==='minor_course_req' || k==='migration_request' || k==='withdrawal_done' || k==='online_withdrawal' || k==='online_plan_new' || k==='online_piece_done' || k==='online_plan_qr' || k==='online_plan_active' || k==='withdrawal_request' || k==='minor_member_app' || k==='minor_waiver' || k==='family_request' || k==='autonomy_sunset' || k==='dropin_bank_cancelled' || k==='bug_report' || k==='milestone' || k==='address_from_club' || k==='address_request' || k==='class_cancelled' || k==='trial_booked' || k==='pis_creditor_outage' || (String(k||'').indexOf('kid_share')===0) || k==='kidxfer' || k==='kidxfer_done' || k==='kidxfer_reversed' || k==='support_ticket' || k==='class_reminder' || k==='fav_added_coach' || k==='fav_added_gym' || isCoachLessonRem || isStudResched || k==='coach_pay_ok' || k==='coach_qr_intent' || k==='qr_unconfirmed' || k==='event_qr_intent' || k==='walkin_drop' || k==='org_linked' || k==='org_accepted' || k==='org_fee' || k==='org_invite' || k==='org_fee_paid' || k==='org_join' || k==='org_fee_in' || k==='org_join_req' || k==='org_removed' || k==='org_left' || k==='org_expiring' || k==='beta_pending' || k==='came_of_age' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || k==='resched_conf' || k==='cancel_conf' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked' || k==='commission_no_card' || k==='commission_suspended' || k==='new_provider' || k==='supplier_live' || k==='supplier_ended';
     // Data notifikace i pro štítky odkazu (class_cancelled, coach_qr_intent, qr_unconfirmed...).
     // Dřív tu _pd nebylo -- žilo jen v obsluze kliknutí níž -- a štítek padal na ReferenceError.
     var _pd={}; try{ _pd=JSON.parse(n.data||'{}')||{}; }catch(e){ _pd={}; }
@@ -35462,6 +35621,7 @@ async function loadNotifications(append){
       else if(k==='provider_closing' || k==='provider_restored' || k==='provider_closed') linkLabel = (LANG==='en'?'My bookings and memberships ›':'Moje rezervace a členství ›');
       else if(k==='entity_deleted') linkLabel = (LANG==='en'?'Payments overview ›':'Přehled plateb ›');
       else if(k==='entity_closing_admin') linkLabel = (LANG==='en'?'Open in Admin ›':'Otevřít v Adminu ›');
+      else if(k==='mtl_terminated' || k==='dsa_illegal_notice') linkLabel = (LANG==='en'?'Details ›':'Podrobnosti ›');
       else if(k==='xp_adjusted' || k==='xp_restored') linkLabel = (LANG==='en'?'My XP ›':'Moje XP ›');
       else if(k==='owner_xfer_request') linkLabel = LANG==='en'?'View and decide ›':'Zobrazit a rozhodnout ›';
       else if(k==='owner_xfer_declined' || k==='owner_xfer_cancelled') linkLabel = LANG==='en'?'Details ›':'Podrobnosti ›';
@@ -36036,6 +36196,7 @@ async function loadNotifications(append){
         else if(k==='account_blocked'){ try{ const _d=JSON.parse(n.data||'{}'); closeSheet('shNotif'); _showAccountBlocked(_d); }catch(e){} }
         else if(k==='provider_closing' || k==='provider_restored' || k==='provider_closed'){ try{ closeSheet('shNotif'); }catch(e){} try{ openSheet('shBookings'); if(typeof loadBookings==='function') loadBookings('upcoming'); }catch(e){} }
         else if(k==='entity_deleted'){ try{ closeSheet('shNotif'); }catch(e){} try{ const _d=JSON.parse(n.data||'{}'); if(typeof _openFinance==='function') _openFinance(_d.entity_kind==='coach'?'coach':'club'); else openSheet('shDanger'); }catch(e){} }
+        else if(k==='mtl_terminated' || k==='dsa_illegal_notice'){ let _d={}; try{ _d=(typeof n.data==='string'?JSON.parse(n.data||'{}'):n.data)||{}; }catch(e){} try{ closeSheet('shNotif'); }catch(e){} _showMtlNotice(k, _d); }
         else if(k==='entity_closing_admin'){ let _d={}; try{ _d=(typeof n.data==='string'?JSON.parse(n.data||'{}'):n.data)||{}; }catch(e){} try{ closeSheet('shNotif'); }catch(e){} try{ if(typeof openAdminUsers==='function') openAdminUsers({ userId:_d.user_id||null }); }catch(e){} }
         else if(k==='xp_adjusted' || k==='xp_restored'){ try{ closeSheet('shNotif'); }catch(e){} try{ if(typeof openLevel==='function') openLevel(); }catch(e){} }
         else if(k==='admin_suspended'){ try{ const _d=JSON.parse(n.data||'{}'); closeSheet('shNotif'); _showManualSuspension(_d); }catch(e){} }
@@ -36141,7 +36302,7 @@ async function updateNotifBadge(){
   // Dřív šlo všech ~10 dotazů za sebou (profil, výdělky, přehledy…) a kroužek se točil
   // několik sekund, i když se deck načetl hned.
   await Promise.all([
-    _sheetOpen ? null : (async function(){ await loadCoaches(); if(typeof updateCoachSummary==='function') await updateCoachSummary(); })(),
+    _sheetOpen ? null : (async function(){ try{ _gymsLoaded=false; await ensureGymsLoaded(true); }catch(e){} await loadCoaches(); if(typeof updateCoachSummary==='function') await updateCoachSummary(); })(),
     updateNotifBadge()
   ]);
   const _rest=(async function(){
@@ -47033,8 +47194,11 @@ function _admUserAction(action, id, name, after){
       .catch(function(e){ bt.disabled=false; toast('⚠️ '+e.message, 1); });
   };
 }
-// opts.userId: otevře rovnou toho uživatele (proklik z notifikace „požádal o výmaz").
-// Prázdné hledání: kdo žádá o výmaz nebo se sám pozastavil (účet i profily) + pozastavení MTL.
+// opts.userId: otevře rovnou toho uživatele (proklik z notifikace). Jinak jen hledání podle jména
+// nebo e-mailu, po 20 na stránku -- žádný výpis všech (v globálním měřítku k ničemu a zbytečně drahý).
+// U uživatele: jeho účet a všechny jeho profily (kouč, kluby, organizace) se stavem -- žádost o výmaz
+// s důvodem, pozastavení samým poskytovatelem, pozastavení MTL -- a akce: pozastavit (MTL),
+// ukončit spolupráci (MTL, hned), u účtu i pozastavit / zabanovat přihlášení.
 async function openAdminUsers(opts){
   const EN=LANG==='en'; opts=opts||{};
   if(!currentUser || currentUser.id!==FOUNDER_UUID){ toast(EN?'Founder only':'Jen pro zakladatele'); return; }
@@ -47043,101 +47207,104 @@ async function openAdminUsers(opts){
   ov.style.cssText='position:fixed;inset:0;z-index:100060;background:#fff;overflow-y:auto;font-family:\'DM Sans\';padding:20px 16px max(28px,env(safe-area-inset-bottom));box-sizing:border-box;';
   ov.innerHTML='<div style="max-width:620px;margin:0 auto;">'
     +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;"><div style="font-size:19px;font-weight:800;">👤 '+(EN?'Users':'Uživatelé')+'</div><button id="auClose" style="background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:7px 12px;font-weight:700;cursor:pointer;font-family:inherit;">✕</button></div>'
-    +'<div style="font-size:12px;color:var(--light);margin-bottom:12px;line-height:1.5;">'+(EN?'Search all accounts by name or e-mail. With an empty search you see who is leaving (deletion requested or paused themselves) and accounts blocked by MTL.':'Hledej ve všech účtech podle jména nebo e-mailu. S prázdným hledáním vidíš, kdo odchází (žádá o výmaz nebo se sám pozastavil), a účty pozastavené či zabanované MTL.')+'</div>'
+    +'<div style="font-size:12px;color:var(--light);margin-bottom:12px;line-height:1.5;">'+(EN?'Search all accounts by name or e-mail (at least 2 characters).':'Hledej ve všech účtech podle jména nebo e-mailu (aspoň 2 znaky).')+'</div>'
     +'<input id="auQ" type="search" placeholder="'+(EN?'Name or e-mail…':'Jméno nebo e-mail…')+'" style="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:inherit;margin-bottom:12px;">'
     +'<div id="auList"></div></div>';
   document.body.appendChild(ov);
   try{ _dashBackAdd(ov); }catch(e){}
   ov.querySelector('#auClose').onclick=function(){ ov.remove(); };
   const list=ov.querySelector('#auList');
-  let focusId=opts.userId?String(opts.userId):null;
+  let focusId=opts.userId?String(opts.userId):null, page=0;
+  const PER=20;
   const dl=EN?'en-GB':'cs-CZ';
   const fd=function(v){ try{ return new Date(v).toLocaleDateString(dl,{ timeZone:'Europe/Prague' }); }catch(e){ return ''; } };
   const COLS='id,name,email,phone,created_at,suspended,banned,suspend_reason,blocked_at,coach_status,risk_flag,deleted_at,deactivated_at,coach_closing_at,coach_paused_at,account_suspended,suspend_manual';
   const COLS_OLD='id,name,email,phone,created_at,suspended,banned,suspend_reason,blocked_at,coach_status,risk_flag,deleted_at,deactivated_at';
   const pq=async function(build){
-    let r=await build(supaClient.from('profiles_admin').select(COLS));
-    if(r.error && /coach_closing_at|coach_paused_at|account_suspended/.test(String(r.error.message||''))) r=await build(supaClient.from('profiles_admin').select(COLS_OLD));
-    if(r.error) throw r.error; return r.data||[];
+    let r=await build(supaClient.from('profiles_admin').select(COLS,{ count:'exact' }));
+    if(r.error && /coach_closing_at|coach_paused_at|account_suspended|suspend_manual/.test(String(r.error.message||''))) r=await build(supaClient.from('profiles_admin').select(COLS_OLD,{ count:'exact' }));
+    if(r.error) throw r.error; return { rows:r.data||[], total:(r.count!=null?r.count:(r.data||[]).length) };
   };
   const reasonLbl=function(k){ const r=(typeof _CLOSE_REASONS!=='undefined'?_CLOSE_REASONS:[]).find(function(x){ return x[0]===k; }); return r?(EN?r[2]:r[1]):(k||'—'); };
+  const B=function(cls,data,bg,col,bd,label){ return '<button class="'+cls+'" '+data+' style="padding:7px 10px;background:'+bg+';color:'+col+';border:1px solid '+bd+';border-radius:9px;font-weight:800;cursor:pointer;font-size:12px;font-family:inherit;">'+label+'</button>'; };
   const load=async function(){
     const qv=(ov.querySelector('#auQ').value||'').trim().replace(/[,()%*\\]/g,' ').trim();
+    if(!(focusId && !qv) && qv.length<2){ list.innerHTML='<p style="color:var(--light);font-size:13px;">'+(EN?'Type a name or an e-mail.':'Napiš jméno nebo e-mail.')+'</p>'; return; }
     list.innerHTML='<p style="color:var(--light);font-size:13px;">'+L('Načítám...')+'</p>';
-    let rows=[];
+    let rows=[], total=0;
     try{
-      if(focusId && !qv) rows=await pq(function(b){ return b.eq('id',focusId).limit(1); });
-      else if(qv.length>=2) rows=await pq(function(b){ return b.or('name.ilike.%'+qv+'%,email.ilike.%'+qv+'%').order('name',{ascending:true}).limit(40); });
-      else {
-        rows=await pq(function(b){ return b.or('suspended.eq.true,banned.eq.true,deleted_at.not.is.null,deactivated_at.not.is.null,coach_closing_at.not.is.null,coach_paused_at.not.is.null').order('name',{ascending:true}).limit(80); }).catch(function(){ return pq(function(b){ return b.or('suspended.eq.true,banned.eq.true').order('name',{ascending:true}).limit(80); }); });
-        // Majitelé klubů a organizací, které se ruší nebo jsou pozastavené.
-        let own=[];
-        try{ const a=await supaClient.from('gyms').select('owner_id').or('deleted_at.not.is.null,paused_at.not.is.null,account_suspended.eq.true').limit(200); (a.data||[]).forEach(function(x){ if(x.owner_id) own.push(String(x.owner_id)); }); }catch(e){}
-        try{ const a=await supaClient.from('organizations').select('owner_id').or('deleted_at.not.is.null,paused_at.not.is.null,account_suspended.eq.true').limit(200); (a.data||[]).forEach(function(x){ if(x.owner_id) own.push(String(x.owner_id)); }); }catch(e){}
-        own=own.filter(function(id){ return !rows.some(function(r){ return String(r.id)===id; }); });
-        if(own.length){ try{ rows=rows.concat(await pq(function(b){ return b.in('id',[...new Set(own)].slice(0,100)); })); }catch(e){} }
-      }
+      const r=(focusId && !qv) ? await pq(function(b){ return b.eq('id',focusId).limit(1); })
+        : await pq(function(b){ return b.or('name.ilike.%'+qv+'%,email.ilike.%'+qv+'%').order('name',{ascending:true}).range(page*PER, page*PER+PER-1); });
+      rows=r.rows; total=r.total;
     }catch(e){ list.innerHTML='<p style="color:var(--red);font-size:13px;">⚠️ '+escapeHtml(e.message||'')+'</p>'; return; }
-    if(!rows.length){ list.innerHTML='<p style="color:var(--light);font-size:13px;">'+(qv.length>=2||focusId?(EN?'Nobody found.':'Nikdo nenalezen.'):(EN?'Nobody is leaving and no account is blocked.':'Nikdo neodchází a žádný účet není pozastavený ani zabanovaný.'))+'</p>'; return; }
-    // Profily (kluby, organizace) těchhle lidí a poslední žádosti o výmaz / pozastavení s důvodem.
+    if(!rows.length){ list.innerHTML='<p style="color:var(--light);font-size:13px;">'+(EN?'Nobody found.':'Nikdo nenalezen.')+'</p>'; return; }
     const ids=rows.map(function(u){ return String(u.id); });
     let gyms=[], orgs=[], logs=[];
-    try{ const r=await supaClient.from('gyms').select('id,name,owner_id,deleted_at,paused_at,account_suspended,suspend_manual,suspend_reason,suspend_howto').in('owner_id',ids); gyms=r.data||[]; }catch(e){}
-    try{ const r=await supaClient.from('organizations').select('id,name,owner_id,kind,deleted_at,paused_at,account_suspended,suspend_manual,suspend_reason,suspend_howto').in('owner_id',ids); orgs=r.data||[]; }catch(e){}
+    try{ const r=await supaClient.from('gyms').select('id,name,owner_id,status,deleted_at,paused_at,account_suspended,suspend_manual,suspend_reason,purged_at').in('owner_id',ids); gyms=(r.data||[]).filter(function(g){ return !g.purged_at && g.status!=='deleted'; }); }catch(e){}
+    try{ const r=await supaClient.from('organizations').select('id,name,owner_id,kind,deleted_at,paused_at,account_suspended,suspend_manual,suspend_reason,purged_at').in('owner_id',ids); orgs=(r.data||[]).filter(function(o){ return !o.purged_at; }); }catch(e){}
     try{ const r=await supaClient.from('entity_close_log').select('kind,entity_id,user_id,action,mode,reason_key,reason,delete_on,created_at').in('user_id',ids).in('action',['close','restore','pause','unpause']).order('created_at',{ascending:false}).limit(300); logs=r.data||[]; }catch(e){}
     const lastLog=function(kind, eid){ return logs.find(function(l){ return l.kind===kind && String(l.entity_id)===String(eid); }); };
-    const ent=function(kind, row, uid){
-      const name=kind==='account'?(EN?'Whole account':'Celý účet'):kind==='coach'?(EN?'Coach profile':'Profil kouče'):((kind==='gym'?(EN?'Club ':'Klub '):(EN?'Organization ':'Organizace '))+'„'+(row.name||'')+'“');
-      const closing=kind==='account'?row.deleted_at:kind==='coach'?row.coach_closing_at:row.deleted_at;
-      const paused=kind==='account'?row.deactivated_at:kind==='coach'?row.coach_paused_at:row.paused_at;
-      const mtl=kind==='account'?false:!!row.account_suspended;
-      if(!closing && !paused && !mtl) return '';
-      const lg=lastLog(kind, kind==='account'||kind==='coach'?uid:row.id);
-      let h='<div style="border-top:1px dashed var(--border);margin-top:9px;padding-top:9px;font-size:12.5px;line-height:1.5;">';
-      if(closing){ const del=new Date(new Date(closing).getTime()+30*864e5);
-        h+='<div style="font-weight:800;color:#8B1E1E;">🗑️ '+escapeHtml(name)+' — '+(EN?'deletion requested ':'žádá o výmaz ')+fd(closing)+(EN?', deleted on ':', smaže se ')+fd(del)+'</div>';
-        if(lg && lg.action==='close') h+='<div style="color:var(--mid);">'+(EN?'Reason: ':'Důvod: ')+'<b>'+escapeHtml(reasonLbl(lg.reason_key))+'</b>'+(lg.reason?(' — „'+escapeHtml(lg.reason)+'“'):'')+'<br>'+(EN?'Settlement: ':'Vypořádání: ')+(lg.mode==='refund'?(EN?'refunds what is paid after the date':'vrátí, co je zaplacené po datu výmazu'):(EN?'fulfils outside the app':'plní mimo aplikaci'))+'</div>';
-      }
-      if(paused && !closing) h+='<div style="font-weight:800;color:#1B3A63;">⏸️ '+escapeHtml(name)+' — '+(EN?'paused by the user ':'pozastavil sám ')+fd(paused)+'</div>';
-      if(mtl) h+='<div style="font-weight:800;color:#8a1c1c;">⛔ '+escapeHtml(name)+' — '+(row.suspend_manual?(EN?'suspended by MTL':'pozastaveno MTL'):(EN?'suspended for unpaid commission':'pozastaveno kvůli neuhrazené provizi'))+(row.suspend_reason?(' · '+escapeHtml(row.suspend_reason)):'')+'</div>';
-      if(kind==='gym'||kind==='org'||kind==='coach'){
-        h+='<div style="display:flex;gap:6px;margin-top:7px;flex-wrap:wrap;">';
-        if(kind==='gym') h+='<button class="auOpenEnt" data-k="gym" data-id="'+escapeHtml(String(row.id))+'" style="padding:7px 10px;background:var(--surf);border:1px solid var(--border);border-radius:9px;font-weight:700;cursor:pointer;font-size:12px;font-family:inherit;">'+(EN?'Open club ›':'Otevřít klub ›')+'</button>';
-        if(kind==='coach') h+='<button class="auOpenEnt" data-k="coach" data-id="'+escapeHtml(String(uid))+'" style="padding:7px 10px;background:var(--surf);border:1px solid var(--border);border-radius:9px;font-weight:700;cursor:pointer;font-size:12px;font-family:inherit;">'+(EN?'Open profile ›':'Otevřít profil ›')+'</button>';
-        const on=mtl && !!row.suspend_manual;
-        h+='<button class="auSuspEnt" data-k="'+kind+'" data-id="'+escapeHtml(String(kind==='coach'?uid:row.id))+'" data-name="'+escapeHtml(kind==='coach'?(row.name||''):(row.name||''))+'" data-on="'+(on?1:0)+'" style="padding:7px 10px;background:'+(on?'#F0FBF0':'#FDECEC')+';color:'+(on?'#006040':'#8a1c1c')+';border:1px solid '+(on?'#A8E6C0':'#F3C0C0')+';border-radius:9px;font-weight:800;cursor:pointer;font-size:12px;font-family:inherit;">'+(on?(EN?'Lift MTL suspension':'Zrušit pozastavení MTL'):(EN?'⛔ Suspend (MTL)':'⛔ Pozastavit (MTL)'))+'</button>';
-        h+='</div>';
-      }
+    // Jeden řádek na profil: název, stav, akce.
+    const ent=function(kind, row, uid, uname){
+      const name=kind==='coach'?(EN?'Coach profile':'Profil kouče'):((kind==='gym'?'🏛️ ':'🏷️ ')+(row.name||''));
+      const closing=kind==='coach'?row.coach_closing_at:row.deleted_at;
+      const paused=kind==='coach'?row.coach_paused_at:row.paused_at;
+      const mtl=!!row.account_suspended;
+      const eid=kind==='coach'?uid:row.id;
+      let h='<div style="border-top:1px dashed var(--border);margin-top:9px;padding-top:9px;font-size:12.5px;line-height:1.5;">'
+        +'<div style="font-weight:800;color:var(--dark);">'+(kind==='coach'?'🥊 ':'')+escapeHtml(name)+'</div>';
+      if(closing){ const lg=lastLog(kind, eid); const del=new Date(new Date(closing).getTime()+30*864e5);
+        h+='<div style="color:#8B1E1E;font-weight:700;">🗑️ '+(EN?'Deletion requested ':'Žádá o výmaz ')+fd(closing)+(EN?', deleted on ':', smaže se ')+fd(del)+'</div>';
+        if(lg && lg.action==='close') h+='<div style="color:var(--mid);">'+(EN?'Reason: ':'Důvod: ')+'<b>'+escapeHtml(reasonLbl(lg.reason_key))+'</b>'+(lg.reason?(' — „'+escapeHtml(lg.reason)+'“'):'')+' · '+(lg.mode==='refund'?(EN?'refunds':'vrátí peníze'):(EN?'fulfils outside the app':'plní mimo aplikaci'))+'</div>';
+      } else if(paused) h+='<div style="color:#1B3A63;font-weight:700;">⏸️ '+(EN?'Paused by the user ':'Pozastavil sám ')+fd(paused)+'</div>';
+      if(mtl) h+='<div style="color:#8a1c1c;font-weight:700;">⛔ '+(row.suspend_manual?(EN?'Suspended by MTL':'Pozastaveno MTL'):(EN?'Suspended — unpaid commission':'Pozastaveno — neuhrazená provize'))+(row.suspend_reason?(' · '+escapeHtml(row.suspend_reason)):'')+'</div>';
+      if(!closing && !paused && !mtl) h+='<div style="color:var(--mid);">✅ '+(EN?'Active':'Aktivní')+'</div>';
+      const on=mtl && !!row.suspend_manual, nm=kind==='coach'?uname:(row.name||'');
+      h+='<div style="display:flex;gap:6px;margin-top:7px;flex-wrap:wrap;">'
+        +(kind!=='org'?B('auOpenEnt','data-k="'+kind+'" data-id="'+escapeHtml(String(eid))+'"','var(--surf)','var(--dark)','var(--border)',EN?'Open ›':'Otevřít ›'):'')
+        +B('auSuspEnt','data-k="'+kind+'" data-id="'+escapeHtml(String(eid))+'" data-name="'+escapeHtml(nm)+'" data-on="'+(on?1:0)+'"',on?'#F0FBF0':'#FFF8E6',on?'#006040':'#8a5a00',on?'#A8E6C0':'#F0E0A8',on?(EN?'Lift MTL suspension':'Zrušit pozastavení MTL'):(EN?'⛔ Suspend (MTL)':'⛔ Pozastavit (MTL)'))
+        +B('auTermEnt','data-k="'+kind+'" data-id="'+escapeHtml(String(eid))+'" data-name="'+escapeHtml(nm)+'"','#FDECEC','#8a1c1c','#F3C0C0',EN?'🗑️ End cooperation':'🗑️ Ukončit spolupráci')
+        +'</div>';
       return h+'</div>';
     };
-    const head=focusId&&!qv?('<div style="display:flex;justify-content:space-between;align-items:center;background:var(--surf);border-radius:10px;padding:8px 11px;margin-bottom:10px;font-size:12.5px;color:var(--mid);"><span>'+(EN?'From the notification':'Z notifikace')+'</span><button id="auAll" style="background:none;border:none;color:var(--dark);font-weight:800;cursor:pointer;font-family:inherit;font-size:12.5px;">'+(EN?'Show everyone ›':'Zobrazit všechny ›')+'</button></div>'):'';
+    const head=(focusId&&!qv)?('<div style="display:flex;justify-content:space-between;align-items:center;background:var(--surf);border-radius:10px;padding:8px 11px;margin-bottom:10px;font-size:12.5px;color:var(--mid);"><span>'+(EN?'From the notification':'Z notifikace')+'</span></div>'):'';
+    const pages=Math.max(1, Math.ceil(total/PER));
+    const pager=(!(focusId&&!qv) && total>PER)?('<div style="display:flex;align-items:center;gap:10px;padding:6px 0 4px;"><button id="auPrev" '+(page<=0?'disabled':'')+' style="padding:7px 12px;border-radius:9px;border:1px solid var(--border);background:none;font-weight:700;cursor:pointer;font-family:inherit;opacity:'+(page<=0?'.4':'1')+';">‹</button><div style="font-size:12px;color:var(--mid);">'+(page+1)+' / '+pages+' · '+total+'</div><button id="auNext" '+(page>=pages-1?'disabled':'')+' style="margin-left:auto;padding:7px 12px;border-radius:9px;border:1px solid var(--border);background:none;font-weight:700;cursor:pointer;font-family:inherit;opacity:'+(page>=pages-1?'.4':'1')+';">›</button></div>'):'';
     list.innerHTML=head+rows.map(function(u){
       const st=u.banned?('<span style="color:#fff;background:#8a1c1c;border-radius:6px;padding:1px 7px;font-size:11px;font-weight:800;">'+(EN?'BANNED':'ZABANOVÁN')+'</span>'):(u.suspended?('<span style="color:#8a1c1c;background:#FDECEC;border-radius:6px;padding:1px 7px;font-size:11px;font-weight:800;">'+(EN?'SUSPENDED':'POZASTAVEN')+'</span>'):'');
       const leaving=(u.deleted_at||u.coach_closing_at||gyms.some(function(g){ return String(g.owner_id)===String(u.id)&&g.deleted_at; })||orgs.some(function(o){ return String(o.owner_id)===String(u.id)&&o.deleted_at; }))?('<span style="color:#8B1E1E;background:#FEECEC;border-radius:6px;padding:1px 7px;font-size:11px;font-weight:800;">'+(EN?'LEAVING':'NA ODCHODU')+'</span>'):'';
       const blocked=!!(u.banned||u.suspended);
-      let ents=ent('account', u, u.id);
-      if(u.coach_status==='approved'||u.coach_closing_at||u.coach_paused_at) ents+=ent('coach', u, u.id);
-      gyms.filter(function(g){ return String(g.owner_id)===String(u.id); }).forEach(function(g){ ents+=ent('gym', g, u.id); });
-      orgs.filter(function(o){ return String(o.owner_id)===String(u.id); }).forEach(function(o){ ents+=ent('org', o, u.id); });
+      let acc='';
+      if(u.deleted_at) acc='<div style="font-size:12.5px;color:#8B1E1E;font-weight:700;margin-top:6px;">🗑️ '+(EN?'Account deletion requested ':'Žádá o výmaz účtu ')+fd(u.deleted_at)+(EN?', deleted on ':', smaže se ')+fd(new Date(new Date(u.deleted_at).getTime()+30*864e5))+'</div>';
+      else if(u.deactivated_at) acc='<div style="font-size:12.5px;color:#1B3A63;font-weight:700;margin-top:6px;">⏸️ '+(EN?'Account paused by the user ':'Účet pozastavil sám ')+fd(u.deactivated_at)+'</div>';
+      let ents='';
+      if(u.coach_status==='approved'||u.coach_closing_at||u.coach_paused_at) ents+=ent('coach', u, u.id, u.name||'');
+      gyms.filter(function(g){ return String(g.owner_id)===String(u.id); }).forEach(function(g){ ents+=ent('gym', g, u.id, u.name||''); });
+      orgs.filter(function(o){ return String(o.owner_id)===String(u.id); }).forEach(function(o){ ents+=ent('org', o, u.id, u.name||''); });
       return '<div style="border:1px solid var(--border);border-radius:12px;padding:12px 13px;margin-bottom:9px;">'
-        +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span style="font-weight:800;font-size:14.5px;">'+escapeHtml(u.name||'?')+'</span>'+st+leaving+(u.risk_flag?'<span style="font-size:11px;color:#B25C00;">⚠️ '+(EN?'flagged':'označen')+'</span>':'')+(u.coach_status==='approved'?'<span style="font-size:11px;color:var(--mid);">🥊 '+(EN?'coach':'kouč')+'</span>':'')+'</div>'
+        +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span style="font-weight:800;font-size:14.5px;">'+escapeHtml(u.name||'?')+'</span>'+st+leaving+(u.risk_flag?'<span style="font-size:11px;color:#B25C00;">⚠️ '+(EN?'flagged':'označen')+'</span>':'')+'</div>'
         +'<div style="font-size:12px;color:var(--light);margin-top:2px;">'+(u.email?('<a href="mailto:'+escapeHtml(u.email)+'" style="color:var(--mid);">'+escapeHtml(u.email)+'</a>'):'')+(u.phone?(' · <a href="tel:'+escapeHtml(String(u.phone).replace(/\s+/g,''))+'" style="color:var(--mid);">'+escapeHtml(u.phone)+'</a>'):'')+(u.created_at?(' · '+(EN?'since ':'od ')+fd(u.created_at)):'')+'</div>'
         +((blocked&&u.suspend_reason)?('<div style="font-size:12px;color:var(--mid);background:var(--surf);border-radius:8px;padding:7px 9px;margin-top:8px;line-height:1.45;"><b>'+(EN?'Reason: ':'Důvod: ')+'</b>'+escapeHtml(u.suspend_reason)+(u.blocked_at?(' · '+fd(u.blocked_at)):'')+'</div>'):'')
-        +ents
-        +'<div style="display:flex;gap:7px;margin-top:9px;flex-wrap:wrap;">'
+        +acc+ents
+        +'<div style="border-top:1px dashed var(--border);margin-top:9px;padding-top:9px;font-size:12px;font-weight:800;color:var(--mid);">'+(EN?'WHOLE ACCOUNT':'CELÝ ÚČET')+'</div>'
+        +'<div style="display:flex;gap:7px;margin-top:7px;flex-wrap:wrap;">'
         +'<button class="auXp" data-id="'+u.id+'" style="flex:1;padding:9px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:9px;font-weight:800;cursor:pointer;font-size:12.5px;font-family:inherit;">🎯 XP</button>'
         +(blocked?('<button class="auAct" data-a="restore" data-id="'+u.id+'" style="flex:1;padding:9px;background:#F0FBF0;color:#006040;border:1px solid #A8E6C0;border-radius:9px;font-weight:800;cursor:pointer;font-size:12.5px;font-family:inherit;">'+(EN?'Restore':'Obnovit')+'</button>'):'')
         +((!u.suspended||u.banned)?('<button class="auAct" data-a="suspend" data-id="'+u.id+'" style="flex:1;padding:9px;background:#FFF8E6;color:#8a5a00;border:1px solid #F0E0A8;border-radius:9px;font-weight:800;cursor:pointer;font-size:12.5px;font-family:inherit;">⏸️ '+(EN?'Suspend account':'Pozastavit účet')+'</button>'):'')
         +(!u.banned?('<button class="auAct" data-a="ban" data-id="'+u.id+'" style="flex:1;padding:9px;background:#FDECEC;color:#8a1c1c;border:1px solid #F3C0C0;border-radius:9px;font-weight:800;cursor:pointer;font-size:12.5px;font-family:inherit;">⛔ '+(EN?'Ban account':'Zabanovat účet')+'</button>'):'')
+        +'<button class="auTermEnt" data-k="account" data-id="'+u.id+'" data-name="'+escapeHtml(u.name||'')+'" style="flex-basis:100%;padding:9px;background:#8a1c1c;color:#fff;border:none;border-radius:9px;font-weight:800;cursor:pointer;font-size:12.5px;font-family:inherit;">🗑️ '+(EN?'End cooperation — delete the account':'Ukončit spolupráci — smazat celý účet')+'</button>'
         +'</div></div>';
-    }).join('');
-    const all=list.querySelector('#auAll'); if(all) all.onclick=function(){ focusId=null; load(); };
+    }).join('')+pager;
+    const pv=list.querySelector('#auPrev'), nx=list.querySelector('#auNext');
+    if(pv) pv.onclick=function(){ if(page>0){ page--; load(); } };
+    if(nx) nx.onclick=function(){ if(page<pages-1){ page++; load(); } };
     list.querySelectorAll('.auAct').forEach(function(b){ b.onclick=function(){ const u=rows.find(function(x){ return String(x.id)===b.dataset.id; })||{}; _admUserAction(b.dataset.a, b.dataset.id, u.name||'', load); }; });
     list.querySelectorAll('.auXp').forEach(function(b){ b.onclick=function(){ const u=rows.find(function(x){ return String(x.id)===b.dataset.id; })||{}; _admXpPanel(b.dataset.id, u.name||''); }; });
     list.querySelectorAll('.auSuspEnt').forEach(function(b){ b.onclick=function(){ _admSuspDialog(b.dataset.k, b.dataset.id, b.dataset.name, b.dataset.on==='1', load); }; });
+    list.querySelectorAll('.auTermEnt').forEach(function(b){ b.onclick=function(){ _admTerminateDialog(b.dataset.k, b.dataset.id, b.dataset.name, load); }; });
     list.querySelectorAll('.auOpenEnt').forEach(function(b){ b.onclick=function(){ try{ if(b.dataset.k==='gym') openGymProfile({ id:b.dataset.id }); else openProfileById(b.dataset.id); }catch(e){} }; });
   };
-  let _t=null; ov.querySelector('#auQ').oninput=function(){ clearTimeout(_t); _t=setTimeout(load, 300); };
+  let _t=null; ov.querySelector('#auQ').oninput=function(){ clearTimeout(_t); _t=setTimeout(function(){ focusId=null; page=0; load(); }, 300); };
   load();
 }
 // ADMIN → UŽIVATEL → XP: kolik XP má (student, kouč, každý jeho klub) a odebrání jakéhokoli XP
@@ -55485,8 +55652,11 @@ async function _closeApi(body){
   if(!r.ok) { const e=new Error(j.error||('HTTP '+r.status)); e.data=j; throw e; }
   return j;
 }
-async function _closeRefresh(){
+// reloadDeck: po pozastavení / výmazu / obnovení se deck načte znovu -- klub nebo kouč v něm
+// hned zmizí (ostatním) nebo dostane odznak (majiteli, týmu, zakladateli).
+async function _closeRefresh(reloadDeck){
   try{ if(!currentUser) return; window._closeState=await _closeApi({ action:'state' }); }catch(e){ return; }
+  if(reloadDeck){ try{ window._hidState={}; _gymsLoaded=false; await ensureGymsLoaded(true); if(typeof loadCoaches==='function') await loadCoaches(); }catch(e){} }
   try{ renderAcctStateBar(); }catch(e){}
   try{ if($('shDanger') && $('shDanger').classList.contains('open')) _renderDangerList(); }catch(e){}
   try{ ['shGymManage','shCoachSettings','shOrgApply'].forEach(function(id){ if($(id) && $(id).classList.contains('open')) _closeInject(id); }); }catch(e){}
@@ -55543,7 +55713,7 @@ async function _closeAction(act, kind, id, name){
     if(kind==='account' && currentUser){ if(act==='restore') currentUser.deleted_at=null; if(act==='pause') currentUser.deactivated_at=new Date().toISOString(); if(act==='unpause') currentUser.deactivated_at=null; }
     if(kind==='coach' && currentUser && act==='restore') currentUser.coach_closing_at=null;
   }catch(e){ toast('⚠️ '+((e&&e.message)||''),1); }
-  _closeRefresh();
+  _closeRefresh(true);
 }
 // OBNOVENÍ (zrušení žádosti o výmaz): okno s následky, souhlas se zapíše na server
 // (entity_close_log) a přijde potvrzení e-mailem.
@@ -55591,7 +55761,7 @@ function openRestoreFlow(kind, id, name){
       if(kind==='account' && currentUser) currentUser.deleted_at=null;
       if(kind==='coach' && currentUser) currentUser.coach_closing_at=null;
     }catch(e){ go.disabled=false; go.textContent=EN?'Restore':'Obnovit'; toast('⚠️ '+((e&&e.message)||''),1); return; }
-    _closeRefresh();
+    _closeRefresh(true);
   };
 }
 // PROUŽEK V LISTECH PROFILU: v Přehledu a na každé stránce, kde se profil spravuje (klub, kouč,
@@ -55677,7 +55847,7 @@ async function openCloseFlow(kind, id, name){
     +'<button id="_clNo" style="width:100%;padding:11px;background:none;border:none;color:var(--mid);font-weight:700;cursor:pointer;font-family:inherit;margin-top:6px;">'+(EN?'Back':'Zpět')+'</button>';
   card.querySelector('#_clNo').onclick=close;
   { const _pt=card.querySelector('#_clPauseTop'); if(_pt) _pt.onclick=function(){ close(); _closeAction('pause', kind, id, name); }; }
-  let reasonKey=null; window._clTool=null;
+  let reasonKey=null;
   const hints={
     temporary:{ cs:'Na tohle je <b>Pozastavit</b>: profil zmizí, nic nového se neprodá, takže z ničeho neplatíš provizi — a vrátíš ho jedním klikem, i se všemi lidmi a historií. Dluhy vůči MTL a už vystavené provize se ale doplácí a předplatné Exclusive Partner běží dál, dokud ho sám nezrušíš.', en:'That is what <b>Pause</b> is for: the profile disappears and nothing new is sold, so there is no commission to pay — and you bring it back in one click, with all your people and history. Debts to MTL and commission already invoiced still have to be paid, and an Exclusive Partner subscription keeps running until you cancel it.', pause:true },
     other_tool:{ tools:true },
@@ -55690,14 +55860,14 @@ async function openCloseFlow(kind, id, name){
     card.querySelectorAll('#_clReasons button').forEach(function(x){ const on=x===b; x.style.background=on?'var(--dark)':'#fff'; x.style.color=on?'#fff':'var(--dark)'; });
     const h=hints[reasonKey], box=card.querySelector('#_clHint');
     if(!h){ box.innerHTML=''; return; }
-    // SONDA KONKURENCE: který systém a co mu tam vyhovuje víc -- jde zakladateli s důvodem.
+    // SONDA KONKURENCE: který systém (volně -- poskytovatelé jsou z celého světa) a co mu tam
+    // vyhovuje víc. Jde zakladateli s důvodem.
     if(h.tools){
-      const tl=['ProKlub','KIS (eSports.cz)','Sklub.cz','Štafle / Sport Club Management','Mindbody','Excel / tabulka','Papír / hotovost',EN?'Other':'Jiný'];
+      const IN='width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:inherit;font-size:13.5px;';
       box.innerHTML='<div style="background:#F6F3EE;border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:12px;font-size:13px;line-height:1.5;color:var(--dark);">'
         +'<div style="font-weight:800;margin-bottom:8px;">'+(EN?'Which one?':'Který?')+'</div>'
-        +'<div id="_clTools" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;">'+tl.map(function(t){ return '<button data-t="'+escapeHtml(t)+'" style="padding:7px 10px;border:1px solid var(--border);border-radius:999px;background:#fff;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;color:var(--dark);">'+escapeHtml(t)+'</button>'; }).join('')+'</div>'
-        +'<input id="_clToolWhy" maxlength="300" placeholder="'+(EN?'What does it do better than MTL? (optional)':'Co ti tam vyhovuje víc než v MTL? (nepovinné)')+'" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:inherit;font-size:13.5px;"></div>';
-      box.querySelectorAll('#_clTools button').forEach(function(tb){ tb.onclick=function(){ window._clTool=tb.dataset.t; box.querySelectorAll('#_clTools button').forEach(function(x){ const on=x===tb; x.style.background=on?'var(--dark)':'#fff'; x.style.color=on?'#fff':'var(--dark)'; }); }; });
+        +'<input id="_clToolName" maxlength="120" placeholder="'+(EN?'Name of the system or app':'Název systému nebo appky')+'" style="'+IN+'margin-bottom:8px;">'
+        +'<input id="_clToolWhy" maxlength="300" placeholder="'+(EN?'What does it do better than MTL? (optional)':'Co ti tam vyhovuje víc než v MTL? (nepovinné)')+'" style="'+IN+'"></div>';
       return;
     }
     box.innerHTML='<div style="background:#EEF4FF;border:1px solid #CFE0FF;border-radius:12px;padding:12px;margin-bottom:12px;font-size:13px;line-height:1.55;color:#1B3A63;">'+(EN?h.en:h.cs)
@@ -55751,14 +55921,14 @@ async function openCloseFlow(kind, id, name){
     btn.disabled=true; btn.textContent='…';
     try{
       let _why=(card.querySelector('#_clReason').value||'').trim();
-      if(reasonKey==='other_tool'){ const _tw=(card.querySelector('#_clToolWhy')&&card.querySelector('#_clToolWhy').value||'').trim(); _why=('[Jiný systém: '+(window._clTool||'neuvedeno')+(_tw?(' — '+_tw):'')+'] '+_why).trim(); }
+      if(reasonKey==='other_tool'){ const _tn=(card.querySelector('#_clToolName')&&card.querySelector('#_clToolName').value||'').trim(), _tw=(card.querySelector('#_clToolWhy')&&card.querySelector('#_clToolWhy').value||'').trim(); _why=('[Jiný systém: '+(_tn||'neuvedeno')+(_tw?(' — '+_tw):'')+'] '+_why).trim(); }
       await _closeApi({ action:'close', kind:kind, id:id, mode:(m?m.value:'fulfil'), keep_renew:!!(rn && rn.value==='keep'), reason_key:reasonKey, reason:_why, consent_text:consent });
       close();
       if(kind==='account' && currentUser) currentUser.deleted_at=new Date().toISOString();
       if(kind==='coach' && currentUser) currentUser.coach_closing_at=new Date().toISOString();
       _minorInfoPopup(EN?'Deletion requested':'Žádost o výmaz přijata', escapeHtml(EN?(what+' is hidden from everyone now and will be deleted on '+dOn+'. You can cancel it until then from the bar at the top. We have sent you a confirmation e-mail.'):(what+' je od teď skrytý všem a vymaže se '+dOn+'. Do té doby to zrušíš v proužku nahoře. Potvrzení ti přišlo e-mailem.')), 'OK');
     }catch(e){ btn.disabled=false; btn.textContent='🗑️ '+(EN?'Request deletion':'Požádat o výmaz'); toast('⚠️ '+((e&&e.message)||''),1); }
-    _closeRefresh();
+    _closeRefresh(true);
   };
 }
 // Dřívější okno „Smazat" (jen zapsalo datum z prohlížeče) nahradil openCloseFlow -- vše dělá server.
