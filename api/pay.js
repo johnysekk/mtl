@@ -1093,8 +1093,11 @@ async function partnerChange(req, res) {
   if (sub.status === 'past_due') return res.status(409).json({ error: 'Poslední platba předplatného neprošla. Až se zaplatí, stupeň změníš.' });
   const item = sub.items && sub.items.data && sub.items.data[0];
   if (!item || !item.price || !item.price.recurring) return res.status(409).json({ error: 'Předplatné nemá položku k úpravě.' });
-  const product = typeof item.price.product === 'string' ? item.price.product : item.price.product.id;
-  if (!_preview) await epEnsureProduct(product);
+  // NOVÉ CENY VŽDY NA STÁLÝ PRODUKT EP. Produkt, na kterém předplatné vzniklo (z Checkoutu přes
+  // product_data), Stripe vede jako neaktivní a předplatné na jeho ceny nepřevede -- zapnout ho
+  // nejde spolehlivě. Položka předplatného může přejít na cenu jiného produktu, takže se nový
+  // stupeň / interval prostě založí na stálém produktu „Exclusive MTL Partner".
+  const product = _preview ? null : await epProductId();
   const rec = { interval: item.price.recurring.interval, interval_count: item.price.recurring.interval_count || 1 };
   const baseMd = Object.assign({}, sub.metadata || {});
   const subCur = String(item.price.currency || 'czk').toUpperCase();   // předplatné si měnu drží

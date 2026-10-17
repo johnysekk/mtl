@@ -213,8 +213,7 @@ export async function epEnsureProduct(product) {
   return product;
 }
 async function _monthPrice(it, monthUnit) {
-  const product = typeof it.price.product === 'string' ? it.price.product : it.price.product.id;
-  await epEnsureProduct(product);
+  const product = await epProductId();
   const rec = it.price.recurring || {};
   return stripe.prices.create({ currency: it.price.currency, product, unit_amount: monthUnit,
     recurring: rec.interval === 'day' ? _rec(rec) : { interval: 'month', interval_count: 1 } });   // test: denně
@@ -265,7 +264,6 @@ export async function repriceEpForRefDisc(uid) {
   const oldUnit = it.price.unit_amount;
   const metadata = { ep_ref_disc: String(disc), ep_month: String(monthNow),
     ...(next ? { ep_month_next: String(mNext), ep_prev_amount: String(Math.min(Number(md.ep_prev_amount) || Infinity, monthNow * mult * 100)) } : {}) };
-  const product = typeof it.price.product === 'string' ? it.price.product : it.price.product.id;
   let from = null, newShown = null, oldShown = null, per = yearly ? 'year' : 'month';
   try {
     if (s.schedule) {
@@ -283,8 +281,7 @@ export async function repriceEpForRefDisc(uid) {
       newShown = mUnit / 100; oldShown = mOld / 100; per = 'month';
     } else {
       if (newUnit >= oldUnit) { await stripe.subscriptions.update(s.id, { metadata: { ep_ref_disc: String(disc) } }); return false; }
-      await epEnsureProduct(product);
-      const np = await stripe.prices.create({ currency: it.price.currency, product, unit_amount: newUnit, recurring: _rec(rec) });
+      const np = await stripe.prices.create({ currency: it.price.currency, product: await epProductId(), unit_amount: newUnit, recurring: _rec(rec) });
       await stripe.subscriptions.update(s.id, { items: [{ id: it.id, price: np.id }], proration_behavior: 'none', metadata });
       newShown = newUnit / 100; oldShown = oldUnit / 100;
     }
