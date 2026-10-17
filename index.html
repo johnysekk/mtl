@@ -6866,16 +6866,7 @@ function renderAuth(){
 // ════════════════════════════════════════
 // DATA
 // ════════════════════════════════════════
-// Zkratka pro pár největších měst, ať se na ně nemusí volat geokódování. Všechna jsou
-// česká, takže nesou i kód země -- bez něj se u člověka s jinou domovskou zemí nastavilo
-// jen město a země zůstala stará, takže deck vypadal, jako by se nic nestalo.
-const CITY_COORDS = {
-  Praha:   {lat:50.0755,lng:14.4378,cc:'CZ'},
-  Brno:    {lat:49.1951,lng:16.6068,cc:'CZ'},
-  Ostrava: {lat:49.8209,lng:18.2625,cc:'CZ'},
-  Plzeň:   {lat:49.7384,lng:13.3736,cc:'CZ'},
-  Liberec: {lat:50.7663,lng:15.0543,cc:'CZ'},
-};
+// (Zkratka pro 5 českých měst odstraněna 17. 10. 2026 -- město se vybírá z nabídky v zemi účtu.)
 
   
 // DATABÁZE PODLE DOMÉNY. Ostrá appka -> ostrá databáze. Testovací kopie (test.martialtraininglab.com
@@ -7418,10 +7409,51 @@ function _vatIdErr(cc, v){
   if(v.slice(0,2)==='CZ' && !/^CZ\d{8,10}$/.test(v)) return EN?'A Czech VAT ID is CZ + 8\u201310 digits.':'\u010cesk\u00e9 DI\u010c je CZ + 8\u201310 \u010d\u00edslic.';
   return null;
 }
+// ═══ DÉLKA A TVAR VSTUPŮ (pro všechna pole v appce) ════════════════════════════════════
+// Pole bez vlastního limitu dostane rozumný maxlength podle druhu (e-mail 254, telefon 40, PSČ 12,
+// IČO 20, IBAN / PIX / účet 80, jméno / název / město 120, adresa 200, ostatní řádky 300, víceřádkový
+// text 5000). Pole s vlastním maxlength se nemění. Tvar: inputmode="numeric" pustí jen číslice
+// (a mezeru -- PSČ „602 00"), inputmode="decimal" číslice a jednu desetinnou čárku / tečku,
+// type="tel" jen číslice, +, mezery, závorky a pomlčky. Pojistka v databázi: sql/field-limits.sql.
+(function(){
+  function lim(el){
+    try{
+      if(!el || el._mtlLim) return; el._mtlLim=true;
+      if(el.hasAttribute('maxlength')) return;
+      const tg=el.tagName, ty=String(el.type||'text').toLowerCase(), k=String((el.id||'')+' '+(el.name||'')).toLowerCase();
+      if(tg==='TEXTAREA'){ el.maxLength=5000; return; }
+      if(tg!=='INPUT' || ['checkbox','radio','file','hidden','range','color','date','time','datetime-local','month','week','number','submit','button','image','reset'].indexOf(ty)>=0) return;
+      let m=300;
+      if(ty==='email' || /mail/.test(k)) m=254;
+      else if(ty==='tel' || /phone|tel\b/.test(k)) m=40;
+      else if(ty==='password') m=128;
+      else if(/postal|psc|zip/.test(k)) m=12;
+      else if(/taxid|tax_id|vatid|vat_id|\bico|\bdic/.test(k)) m=20;
+      else if(/iban|rval|receiver|account/.test(k)) m=80;
+      else if(/name|title|city|label|nick|abbr/.test(k)) m=120;
+      else if(/addr|street|line1|line2|sidlo/.test(k)) m=200;
+      else if(ty==='url' || /url|link|web/.test(k)) m=2048;
+      el.maxLength=m;
+    }catch(e){}
+  }
+  document.addEventListener('focusin', function(e){ const t=e.target; if(t && (t.tagName==='INPUT' || t.tagName==='TEXTAREA')) lim(t); }, true);
+  document.addEventListener('input', function(e){
+    const el=e.target; if(!el || el.tagName!=='INPUT') return;
+    try{
+      const im=String(el.getAttribute('inputmode')||'').toLowerCase(), ty=String(el.type||'').toLowerCase();
+      let v=el.value, nv=v;
+      if(im==='numeric') nv=v.replace(/[^0-9 ]/g,'');
+      else if(im==='decimal'){ nv=v.replace(/[^0-9.,]/g,''); const i=nv.search(/[.,]/); if(i>=0) nv=nv.slice(0,i+1)+nv.slice(i+1).replace(/[.,]/g,''); }
+      else if(ty==='tel') nv=v.replace(/[^0-9+ ()\-]/g,'');
+      if(nv!==v){ const p=el.selectionStart; el.value=nv; try{ const d=v.length-nv.length; el.setSelectionRange(Math.max(0,(p||0)-d), Math.max(0,(p||0)-d)); }catch(_){} }
+    }catch(_){}
+  }, true);
+})();
 function toast(msg, keepEmoji){
   // Chyby kontroly v databázi lidsky (kterékoli ukládání, které chybu jen vypíše).
   try{ if(/Failed to fetch|NetworkError|Load failed|network error/i.test(String(msg||''))){ msg='\ud83d\udcf4 '+(LANG==='en'?'No connection — nothing was saved. Try again when you are back online.':'Bez připojení — nic se neuložilo. Zkus to znovu, až budeš online.'); keepEmoji=true; } }catch(e){}
   try{ if(/\bno_reply\b/.test(String(msg||''))){ msg='\u26a0\ufe0f '+(LANG==='en'?'You cannot reply to a message from MTL — if needed, write to Support.':'Na zprávu od MTL nejde odpovědět — v případě nutnosti napiš na Podporu.'); keepEmoji=true; } }catch(e){}
+  try{ if(/mtl_len_|value too long/.test(String(msg||''))){ msg='\u26a0\ufe0f '+(LANG==='en'?'The text is too long — shorten it and try again.':'Text je moc dlouhý — zkrať ho a zkus to znovu.'); keepEmoji=true; } }catch(e){}
   try{ if(/provider_closed/.test(String(msg||''))){ msg='\u26a0\ufe0f '+(LANG==='en'?'This provider is not selling anything in MTL right now (paused or leaving).':'Tenhle poskytovatel teď v MTL nic neprodává (pozastavil nebo ruší profil).'); keepEmoji=true; } }catch(e){}
   try{ const _m=String(msg||''); if(/invalid_tax_id/.test(_m)) msg='\u26a0\ufe0f '+(LANG==='en'?'The company ID (I\u010cO) is not valid for the selected country.':'I\u010cO nen\u00ed platn\u00e9 pro zvolenou zemi \u2014 zkontroluj ho.'); else if(/invalid_vat_id/.test(_m)) msg='\u26a0\ufe0f '+(LANG==='en'?'The VAT ID is not valid for the selected country.':'DI\u010c nen\u00ed platn\u00e9 pro zvolenou zemi \u2014 za\u010d\u00edn\u00e1 k\u00f3dem zem\u011b.'); }catch(e){}
   const el = $('toast');
@@ -8248,11 +8280,8 @@ async function _reportGymDemand(discCsv, silent, commit, form){
     } else if(form && form.city && form.city.trim() && form.city.trim().toLowerCase()!==city.toLowerCase()){
       var _fc=form.city.trim();
       try{
-        var _hcc0=String((currentUser&&(currentUser.country_code||currentUser.residence_country))||'').toUpperCase();
-        var _hit=(typeof CITY_COORDS!=='undefined') ? Object.entries(CITY_COORDS).find(function(e){ return e[0].toLowerCase()===_fc.toLowerCase() && (!_hcc0 || e[1].cc===_hcc0); }) : null;
         // Země patří k MĚSTU z formuláře, ne k prohlížené poloze (odtud „Brno, Francie").
-        if(_hit){ city=_hit[0]; lat=_hit[1].lat; lng=_hit[1].lng; country=_hit[1].cc||''; }
-        else{
+        {
           // V ZEMI ÚČTU. Bez omezení „Brno" u francouzského účtu klidně skončilo kdekoli.
           var _hcc=String((currentUser&&(currentUser.country_code||currentUser.residence_country))||'').toLowerCase();
           var _gr=await fetch('/api/geo-search?limit=1&kind=place&lang='+(LANG==='en'?'en':'cs')+(_hcc?('&cc='+encodeURIComponent(_hcc)):'')+'&q='+encodeURIComponent(_fc));
@@ -32606,14 +32635,9 @@ function setNav(id){
 // ════════════════════════════════════════
 // GPS & LOCATION
 // ════════════════════════════════════════
-function guessCityFromCoords(lat,lng){
-  let nearest=null,minD=Infinity;
-  Object.entries(CITY_COORDS).forEach(([city,c])=>{
-    const d=haversine(lat,lng,c.lat,c.lng);
-    if(d<minD){minD=d;nearest=city;}
-  });
-  return minD<80?nearest:null;
-}
+// Název místa z GPS dodá zpětné geokódování (/api/geo-reverse); odhad podle pevného seznamu
+// měst byl jen český a mimo Česko vracel nesmysly.
+function guessCityFromCoords(lat,lng){ return null; }
 
 function _setLocText(){
   const lt=$('locText'); if(!lt) return; const EN=LANG==='en';
@@ -32931,6 +32955,8 @@ function openCityInput(mode){
   // neuložilo nic.
   window._cityMode = (mode === 'browse') ? 'browse' : 'set';
   $('cityInp').value=''; $('cityInp')._place=null;
+  // Prohlížení jinde: jen města, kde v MTL něco je. Vlastní poloha: jakékoli místo v zemi.
+  $('cityInp')._localSource = (window._cityMode==='browse') ? _browseCitySource : null;
   // Našeptávač obcí a jejich částí, jen v zemi: při nastavení v domovské, při prohlížení ve vybrané.
   try{ _attachPlaceSuggest($('cityInp'), function(){
     if(window._cityMode==='browse') return String(($('cityCountry')&&$('cityCountry').value)||'');
@@ -32984,31 +33010,11 @@ async function confirmCity(){
     onLocSet();
     return;
   }
-  // Předdefinovaná města (rychlá cesta). Platí jen když sedí země.
-  const m=Object.entries(CITY_COORDS).find(function(e){
-    if(e[0].toLowerCase()!==val.toLowerCase()) return false;
-    if(_selCC && e[1].cc && _selCC!==e[1].cc) return false;
-    return true;
-  });
-  if(m){
-    $('cityOv').classList.remove('open');
-    if(_browse){ await _setBrowseLoc({ lat:m[1].lat, lng:m[1].lng, city:m[0], country:_ccNm(m[1].cc), countryCode:(m[1].cc||null) }); return; }
-    userLoc={ lat:m[1].lat, lng:m[1].lng, city:m[0], country:(_homeCC?_ccNm(_homeCC):null), countryCode:_homeCC };
-    if(currentUser){
-      // Mění se JEN město a souřadnice. Země sem nepatří.
-      const { error:_e2 }=await supaClient.from('profiles')
-        .update({ city:m[0], city_lat:m[1].lat, city_lng:m[1].lng }).eq('id', currentUser.id);
-      if(_e2){
-        if(/city_outside_country/.test(String(_e2.message||''))){
-          toast(EN?'That city is not in your country.':'To m\u011bsto nen\u00ed v tv\u00e9 zemi.');
-          return;
-        }
-        toast('\u26a0\ufe0f '+(_e2.message||'')); return;
-      }
-      currentUser.city=m[0]; currentUser.city_lat=m[1].lat; currentUser.city_lng=m[1].lng;
-      try{ if(typeof _syncCountryRow==='function') _syncCountryRow(); }catch(e){}
-    }
-    onLocSet();
+  // PROHLÍŽENÍ JINDE jen tam, kde v MTL něco je -- napsané město se musí shodovat s nabídkou.
+  if(_browse){
+    try{ const _all=await _browseCitySource(_selCC); const _hit=(_all||[]).find(function(c){ return _normTxt(c.label)===_normTxt(val); });
+      if(_hit){ $('cityOv').classList.remove('open'); await _setBrowseLoc({ lat:_hit.lat, lng:_hit.lng, city:_hit.label, country:_ccNm(_selCC), countryCode:_selCC }); return; } }catch(e){}
+    toast(EN?'Pick a city from the list — there is nothing in MTL anywhere else yet.':'Vyber město z nabídky — jinde v MTL zatím nic není.');
     return;
   }
 
@@ -51610,6 +51616,28 @@ function _placeFromResult(x){
   return { lat:parseFloat(x.lat), lng:parseFloat(x.lon), label:L.head, city:L.city, district:L.district,
     cc:String(a.country_code||'').toUpperCase()||null, country:a.country||null, precision:x.precision||'city' };
 }
+function _normTxt(t){ try{ return String(t||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim(); }catch(e){ return String(t||'').toLowerCase().trim(); } }
+// Města v zemi, kde v MTL je viditelný klub (adresa provozovny) nebo kouč (jeho město).
+// Bod města = průměr bodů klubů a koučů v něm. Drží se 10 minut na zemi.
+async function _browseCitySource(cc){
+  cc=String(cc||'').toUpperCase(); if(!cc) return [];
+  window._bcCache=window._bcCache||{};
+  const hit=window._bcCache[cc]; if(hit && Date.now()-hit.at<600000) return hit.rows;
+  const by={};
+  const add=function(city, lat, lng, kind){ const nm=String(city||'').trim(); if(!nm || lat==null || lng==null) return; const k=_normTxt(nm);
+    const o=by[k]||(by[k]={ label:nm, sumLat:0, sumLng:0, n:0, gyms:0, coaches:0 }); o.sumLat+=+lat; o.sumLng+=+lng; o.n++; o[kind]++; };
+  try{ const { data }=await supaClient.from('gyms_pub').select('city,city_lat,city_lng,deleted_at,paused_at,suspended,account_suspended').eq('status','approved').eq('country_code', cc).not('city_lat','is',null).limit(5000);
+    (data||[]).forEach(function(g){ if(!_entHidden('gym', g)) add(g.city, g.city_lat, g.city_lng, 'gyms'); }); }catch(e){}
+  try{ const { data }=await supaClient.from('profiles_pub').select('city,city_lat,city_lng,deleted_at,coach_closing_at,coach_paused_at,deactivated_at,account_suspended').eq('coach_status','approved').eq('country_code', cc).not('city_lat','is',null).limit(5000);
+    (data||[]).forEach(function(p){ if(!_entHidden('coach', p)) add(p.city, p.city_lat, p.city_lng, 'coaches'); }); }catch(e){}
+  const EN=LANG==='en';
+  const rows=Object.keys(by).map(function(k){ const o=by[k];
+    const pl=function(n, en1, enN, cs1, cs24, cs5){ return n+' '+(EN?(n===1?en1:enN):(n===1?cs1:(n<5?cs24:cs5))); };
+    const sub=[o.gyms?pl(o.gyms,'club','clubs','klub','kluby','klubů'):'', o.coaches?pl(o.coaches,'coach','coaches','kouč','kouči','koučů'):''].filter(Boolean).join(' · ');
+    return { label:o.label, lat:o.sumLat/o.n, lng:o.sumLng/o.n, cc:cc, sub:sub, n:o.n }; }).sort(function(a,b){ return b.n-a.n; });
+  window._bcCache[cc]={ at:Date.now(), rows:rows };
+  return rows;
+}
 function _attachPlaceSuggest(el, ccGetter, onPick){
   if(!el || el._placeWired) return; el._placeWired=true;
   el.setAttribute('autocomplete','off');
@@ -51624,6 +51652,24 @@ function _attachPlaceSuggest(el, ccGetter, onPick){
     if(v.length<2 || v===_last){ if(v.length<2) hide(); return; }
     _last=v; const my=++_seq;
     const cc=String((typeof ccGetter==='function'?(ccGetter()||''):'')).toLowerCase().replace(/[^a-z]/g,'').slice(0,2);
+    // MÍSTNÍ NABÍDKA (prohlížení jinde): jen města, kde v MTL opravdu něco je.
+    if(typeof el._localSource==='function'){
+      try{
+        const all=await el._localSource(cc); if(my!==_seq) return;
+        const nv=_normTxt(v);
+        const rows=(all||[]).filter(function(c){ return _normTxt(c.label).indexOf(nv)>=0; }).slice(0,8);
+        if(!rows.length){ box.innerHTML='<div style="padding:10px 12px;font-size:12.5px;color:var(--mid);line-height:1.45;">'+(LANG==='en'?'No club or coach there yet in MTL.':'Tam v MTL zatím není žádný klub ani kouč.')+'</div>'; box.style.display='block'; place(); return; }
+        box.innerHTML=rows.map(function(c,i){ return '<div class="plItem" data-i="'+i+'" style="padding:10px 12px;cursor:pointer;border-bottom:1px solid var(--border);line-height:1.35;"><div style="font-size:14px;font-weight:700;color:var(--dark);">'+escapeHtml(c.label)+'</div><div style="font-size:11.5px;color:var(--mid);">'+escapeHtml(c.sub||'')+'</div></div>'; }).join('');
+        place(); box.style.display='block';
+        box.querySelectorAll('.plItem').forEach(function(it){
+          const pick=function(ev){ if(ev&&ev.preventDefault) ev.preventDefault(); const c=rows[Number(it.dataset.i)]; if(!c) return;
+            const pl={ lat:c.lat, lng:c.lng, label:c.label, city:c.label, district:'', cc:c.cc, country:null, precision:'city' };
+            el.value=pl.label; el._place=pl; _last=pl.label; hide(); if(typeof onPick==='function') onPick(pl); };
+          it.addEventListener('mousedown', pick); it.addEventListener('touchstart', pick, { passive:false });
+        });
+      }catch(e){ hide(); }
+      return;
+    }
     try{
       const r=await fetch('/api/geo-search?kind=place&limit=8&lang='+encodeURIComponent(LANG||'cs')+(cc?('&cc='+cc):'')+'&q='+encodeURIComponent(v.length<3?(v+' '):v));
       if(my!==_seq) return;
