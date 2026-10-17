@@ -530,7 +530,7 @@ let deferredMin = 0;
         if (overdue) {
           if (g.payment_mode === 'qr_bank' && !g.account_suspended) {
             await sb(`gyms?id=eq.${gid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ account_suspended: true }) });
-            await notify(g.owner_id, 'account_suspended', `🚫 Účet byl pozastaven kvůli neuhrazené provizi MTL. Gym je skrytý a nelze ho používat (tebou ani tvými svěřenci), dokud provizi neuhradíš (aktualizuj kartu).`, { gym_id: gid, msg_en: `🚫 The account was suspended because of an unpaid MTL commission. The club is hidden and can't be used (by you or students) until the commission is paid (update your card).` });
+            await notify(g.owner_id, 'account_suspended', `🚫 Účet byl pozastaven kvůli neuhrazené provizi MTL. Gym je skrytý a nelze ho používat (tebou ani tvými členy), dokud provizi neuhradíš (aktualizuj kartu).`, { gym_id: gid, msg_en: `🚫 The account was suspended because of an unpaid MTL commission. The club is hidden and can't be used (by you or students) until the commission is paid (update your card).` });
             suspended++;
           } else if (g.payment_mode !== 'qr_bank' && g.takes_cash && !g.cash_blocked) {
             await sb(`gyms?id=eq.${gid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ cash_blocked: true }) });

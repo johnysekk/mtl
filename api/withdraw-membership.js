@@ -124,8 +124,8 @@ export default async function handler(req, res) {
     if (gym.owner_id) {
       const who = ((await sbGet(`profiles?id=eq.${q(me)}&select=name`)) || [])[0] || {};
       const cCs = status === 'refunded'
-        ? `↩️ ${who.name || 'Svěřenec'} odstoupil/a od smlouvy o permanentce${plan} (do 14 dnů). Za ${usedDays} z ${totalDays} dní zůstává klubu ${fmt(keep, cur)}, ${fmt(refund, cur)} se vrátilo automaticky na kartu.`
-        : `↩️ ${who.name || 'Svěřenec'} odstoupil/a od smlouvy o permanentce${plan} (do 14 dnů). Vrať mu převodem ${fmt(refund, cur)} do 14 dnů (§ 1831 OZ) a zapiš to — klubu zůstává ${fmt(keep, cur)} za ${usedDays} z ${totalDays} dní.`;
+        ? `↩️ ${who.name || 'Člen'} odstoupil/a od smlouvy o permanentce${plan} (do 14 dnů). Za ${usedDays} z ${totalDays} dní zůstává klubu ${fmt(keep, cur)}, ${fmt(refund, cur)} se vrátilo automaticky na kartu.`
+        : `↩️ ${who.name || 'Člen'} odstoupil/a od smlouvy o permanentce${plan} (do 14 dnů). Vrať mu převodem ${fmt(refund, cur)} do 14 dnů (§ 1831 OZ) a zapiš to — klubu zůstává ${fmt(keep, cur)} za ${usedDays} z ${totalDays} dní.`;
       const cEn = status === 'refunded'
         ? `↩️ ${who.name || 'A student'} withdrew from their pass${plan} (within 14 days). The club keeps ${fmt(keep, cur)} for ${usedDays} of ${totalDays} days; ${fmt(refund, cur)} was refunded to the card automatically.`
         : `↩️ ${who.name || 'A student'} withdrew from their pass${plan} (within 14 days). Transfer ${fmt(refund, cur)} back within 14 days and record it — the club keeps ${fmt(keep, cur)} for ${usedDays} of ${totalDays} days.`;

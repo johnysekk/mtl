@@ -145,7 +145,7 @@ async function _refundBody(row, { auto, nowIso }, st) {
   await notify(row.student_id, 'pass_transfer_done', sCs, sEn, { transfer_id: row.id, gym_id: row.gym_id, gym_name: gym.name || '', choice: 'refund' });
   // Klub: u převodu úkol vrátit peníze (stejný proklik jako u odstoupení -- zápis vrácení).
   if (gym.owner_id) {
-    const nm = row.student_name || 'Svěřenec';
+    const nm = row.student_name || 'Člen';
     const cCs = refund > 0 && status === 'pending'
       ? `↩️ ${nm}${who} ${auto ? 'se nerozhodl/a do termínu' : 'zvolil/a vrácení peněz'} — permanentka${plan} končí s lekcí ${row.from_name || ''}. Vrať mu/jí převodem ${money(refund, cur)} (nevyčerpané dny) a zapiš to.`
       : `↩️ ${nm}${who} ${auto ? 'se nerozhodl/a do termínu' : 'zvolil/a vrácení peněz'} — permanentka${plan} končí s lekcí ${row.from_name || ''}.${refund > 0 ? ` Na kartu se vrátilo ${money(refund, cur)} automaticky.` : ''}`;
@@ -192,7 +192,7 @@ export async function applyTransfer(row, text) {
     `✅ Your pass${plan}${who} at ${gym.name || 'the club'} now covers: ${row.to_names || ''}, instead of ${row.from_name || ''}, which ends on ${dCz(row.ends_from)}.`,
     { transfer_id: row.id, gym_id: row.gym_id, gym_name: gym.name || '', choice: 'transfer' });
   if (gym.owner_id) await notify(gym.owner_id, 'pass_transfer_decided',
-    `🔁 ${row.student_name || 'Svěřenec'}${who} souhlasí s přesunem permanentky${plan} z lekce ${row.from_name || ''} na: ${row.to_names || ''}.`,
+    `🔁 ${row.student_name || 'Člen'}${who} souhlasí s přesunem permanentky${plan} z lekce ${row.from_name || ''} na: ${row.to_names || ''}.`,
     `🔁 ${row.student_name || 'A student'}${who} agreed to move the pass${plan} from ${row.from_name || ''} to: ${row.to_names || ''}.`,
     { transfer_id: row.id, gym_id: row.gym_id, student_id: row.student_id, member: row.student_name || '' });
   return true;

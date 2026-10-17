@@ -233,7 +233,7 @@ async function notifyCreditorOutage(tbl, row) {
   const ex = await sb.from('notifications').select('data').eq('user_id', ownerId).gte('created_at', since).limit(100);
   if ((ex.data || []).some((n) => String(typeof n.data === 'string' ? n.data : JSON.stringify(n.data || '')).indexOf('pis_creditor_outage') >= 0)) return;
   const cs = '\u26a0\ufe0f Na straně tebou připojené banky teď není možné přijímat okamžité platby' + (name ? (' (' + name + ')') : '') +
-    '. Platby z účtu přes appku proto teď neprojdou. Důvod zjisti u své banky. Svěřenci mohou dál platit QR převodem, který potvrzuješ ručně.';
+    '. Platby z účtu přes appku proto teď neprojdou. Důvod zjisti u své banky. Platit dál jde QR převodem, který potvrzuješ ručně.';
   const en = '\u26a0\ufe0f The bank you connected is not accepting instant payments right now' + (name ? (' (' + name + ')') : '') +
     '. Bank payments through the app will fail until it does. Check the reason with your bank. Students can still pay by QR transfer, which you confirm by hand.';
   await sb.from('notifications').insert({ user_id: ownerId, type: 'system', read: false,

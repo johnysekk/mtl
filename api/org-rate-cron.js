@@ -54,10 +54,18 @@ export default async function handler(req, res) {
 
     // 2) Přepočet sazby. Bere se NEJZAZŠÍ datum ze všech platných členství poskytovatele --
     //    kdo má dva kluby ve dvou asociacích, o sazbu ukončením jednoho nepřijde.
-    const live = await sb(`organization_clubs?status=eq.active&fee_paid_at=not.is.null&valid_until=gte.${today}&select=gym_id,valid_until`);
+    //    Jen členství ve SCHVÁLENÉ asociaci -- stejně jako mtl_recalc_org_rate v databázi
+    //    (sql/rls-3-guards.sql), jinak by si kdokoli založil „asociaci" a sazbu si přidělil sám.
+    const live = await sb(`organization_clubs?status=eq.active&fee_paid_at=not.is.null&valid_until=gte.${today}&select=gym_id,valid_until,organization_id`);
+    const orgIds = [...new Set((live || []).map((r) => r.organization_id).filter(Boolean))];
+    const okOrg = new Set();
+    if (orgIds.length) {
+      const os = await sb(`organizations?id=in.(${orgIds.join(',')})&status=eq.approved&select=id`);
+      for (const o of (os || [])) okOrg.add(String(o.id));
+    }
     const byGym = {};
     for (const r of (live || [])) {
-      if (!r.gym_id || !r.valid_until) continue;
+      if (!r.gym_id || !r.valid_until || !okOrg.has(String(r.organization_id))) continue;
       if (!byGym[r.gym_id] || r.valid_until > byGym[r.gym_id]) byGym[r.gym_id] = r.valid_until;
     }
     const gymIds = Object.keys(byGym);
