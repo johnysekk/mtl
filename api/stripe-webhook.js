@@ -24,6 +24,7 @@ import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 import { pragueMonth } from './_tz.js';
 import { pragueEndOfDay } from './_memb-term.js';
 import { fulfillCheckout } from './_fulfill.js';
+import { bindBuyerForSession, bindBuyerForRenewal } from './_doklad-buyer.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 // Adresa appky pro interní volání (ep-doklad). DŘÍV NEBYLA DEFINOVANÁ: `${APP_URL}` spadlo na
@@ -717,6 +718,8 @@ export default async function handler(req, res) {
     if (event.type === 'checkout.session.completed') {
       const s = event.data.object;
       const m = s.metadata || {};
+      // NÁKUP NA FIRMU: platbu napojit na vyplněnou firmu DŘÍV, než se k ní vystaví doklad.
+      if (event.account) await bindBuyerForSession(stripe, s, event.account);
 
       // ── DOPLATEK NESTRŽENÉ PROVIZE („Zaplatit hned" z e-mailu) ───────────────────────
       // Řádky, které cron označil jako 'failed', se tímto považují za vybrané a odpočet do
@@ -1246,7 +1249,7 @@ export default async function handler(req, res) {
             _subLadder = _ladder / 100;
             await applySubRate(stripe, event.account, sub, _so2, _ladder);
           }
-        }catch(e){ console.error('acq drop', e.message); } if (ipi && mem) await recordTransaction(event.account, ipi, { renewal: true, att_disc: (((inv.lines && inv.lines.data) || []).reduce((a, l) => a + ((l && l.amount < 0 && l.metadata && l.metadata.mtl_att_disc) ? -l.amount : 0), 0) / 100) || null, native: (((inv.subscription_details || {}).metadata || {}).mtl_native === '1'), type: 'membership',  income_class: _incClass, member_id: mem.student_id || mem.member_id, gym_id: mem.gym_id, coach_id: mem.coach_id, plan: mem.plan_name || 'Membership', currency: inv.currency , acq_source: (_subWasAcq ? 'mtl_discovery' : null), acq_months: (_subWasAcq ? 1 : null), base_rate: (_subLadder != null ? _subLadder : null) }); } catch (e) { console.error('record membership', e.message); }
+        }catch(e){ console.error('acq drop', e.message); } if (ipi && mem) await bindBuyerForRenewal(ipi, sub); if (ipi && mem) await recordTransaction(event.account, ipi, { renewal: true, att_disc: (((inv.lines && inv.lines.data) || []).reduce((a, l) => a + ((l && l.amount < 0 && l.metadata && l.metadata.mtl_att_disc) ? -l.amount : 0), 0) / 100) || null, native: (((inv.subscription_details || {}).metadata || {}).mtl_native === '1'), type: 'membership',  income_class: _incClass, member_id: mem.student_id || mem.member_id, gym_id: mem.gym_id, coach_id: mem.coach_id, plan: mem.plan_name || 'Membership', currency: inv.currency , acq_source: (_subWasAcq ? 'mtl_discovery' : null), acq_months: (_subWasAcq ? 1 : null), base_rate: (_subLadder != null ? _subLadder : null) }); } catch (e) { console.error('record membership', e.message); }
       }
     } else if (event.type === 'invoice.payment_failed') {
       const inv = event.data.object;

@@ -293,8 +293,7 @@ async function coachCheckout(req, res) {
   const session = await stripe.checkout.sessions.create({
     mode: 'payment',
     payment_method_types: ['card'],
-    billing_address_collection: 'required',
-    tax_id_collection: { enabled: true },
+    billing_address_collection: 'auto',
     metadata: {
       booking_type: isOnline ? 'online' : 'inperson',
       mtl_credit_row: _credRow || '',
@@ -394,8 +393,7 @@ async function gymCheckout(req, res) {
     {
       mode: 'payment',
       payment_method_types: ['card'],
-      billing_address_collection: 'required',
-      tax_id_collection: { enabled: true },
+      billing_address_collection: 'auto',
       metadata: { mtl_payment_type: (String(merch)==='1'?'merch':'drop_in'), commission_pct: TAKE.toFixed(2), mtl_credit_row: _credRow || '', mtl_credit_user: _credRow ? String(studentId || '') : '', mtl_ref_pct: _credRow ? String(Math.round((MK - STUDENT_MK) * 100)) : '0', mtl_list_amount: String(Math.round(P * 100)), gym_id: gymId || '', student_id: studentId || '', coach_id: coachId || '', mtl_plan: className || 'Drop-in', merch_name: merchName || '', mtl_currency: cur,
         // Ktera pojmenovana cena za vstup to byla a jestli u ni klub jeste musi videt
         // doklad. Webhook to prepise do transakce; bez toho by sleva zmizela beze stopy.
@@ -507,8 +505,7 @@ async function eventCheckout(req, res) {
     {
       mode: 'payment',
       payment_method_types: ['card'],
-      billing_address_collection: 'required',
-      tax_id_collection: { enabled: true },
+      billing_address_collection: 'auto',
       line_items: [
         { price_data: { currency: cur, product_data: { name: `${eventTitle || 'Event'}${tierName ? ' — ' + tierName : ''}` }, unit_amount: unit }, quantity: Q },
       ],
@@ -714,8 +711,7 @@ async function membershipCheckout(req, res) {
       {
         mode: 'payment',
         payment_method_types: ['card'],
-        billing_address_collection: 'required',
-        tax_id_collection: { enabled: true },
+        billing_address_collection: 'auto',
         metadata: _meta,
         line_items: [
           { price_data: { currency: cur, product_data: { name: `${_skLbl} · ${planName || _skLbl} (${_cal && _cal.one ? `do ${_dmy(_cal.one.endsOn)}` : `${_months} měs.`}) — ${gymName || ''}${_D1 ? ` · sleva za docházku −${_D1} ${cur === 'czk' ? 'Kč' : cur.toUpperCase()}` : ''}${_DR ? ` · referral sleva ${Math.round(_ref.pct * 100)} % z 1. měsíce −${_DR} ${cur === 'czk' ? 'Kč' : cur.toUpperCase()}` : ''}` }, unit_amount: _amtMinor }, quantity: 1 }
@@ -777,8 +773,7 @@ async function membershipCheckout(req, res) {
     {
       mode: 'subscription',
       payment_method_types: ['card'],
-      billing_address_collection: 'required',
-      tax_id_collection: { enabled: true },
+      billing_address_collection: 'auto',
       metadata: {
         mtl_payment_type: 'membership',
         gym_id: gymId || '',
@@ -952,7 +947,7 @@ function _checkoutEnd(req, okUrl, cancelUrl) {
 async function _sendCheckout(req, res, session, stripeAccount) {
   if (session.ui_mode === 'embedded') {
     await ensurePmDomain(stripe, req.headers.host, stripeAccount);   // Apple Pay / Google Pay ve vloženém formuláři
-    return res.status(200).json({ clientSecret: session.client_secret, publishableKey: process.env.STRIPE_PUBLISHABLE_KEY, stripeAccount: stripeAccount || null });
+    return res.status(200).json({ clientSecret: session.client_secret, sessionId: session.id, publishableKey: process.env.STRIPE_PUBLISHABLE_KEY, stripeAccount: stripeAccount || null });
   }
   if (_isEmbed(req)) return res.status(200).json({ url: session.url });
   return res.redirect(303, session.url);

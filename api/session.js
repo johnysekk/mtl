@@ -1,5 +1,6 @@
 import Stripe from 'stripe';
 import { recordTransaction as recordStripeTransaction, notifyPaidForMinor } from './stripe-webhook.js';
+import { bindBuyerForSession } from './_doklad-buyer.js';
 import { fulfillCheckout, sessionPaid } from './_fulfill.js';
 import { activatePartner } from './_ep.js';
 
@@ -76,7 +77,7 @@ export default async function handler(req, res) {
       if (!txType) _tx = { recorded: false, reason: 'no mtl_payment_type / booking_type in the session metadata — redeploy pay.js (LX/LY) and make a NEW payment; old sessions have no metadata' };
       else if (!payId) _tx = { recorded: false, reason: 'could not resolve a payment id from the session (subscription invoice may lack payment_intent/charge on this API version)', txType };
       else if (!gymAccount) _tx = { recorded: false, reason: 'no gymAccount/acct passed to /api/session', txType, payId };
-      else { const r = await recordStripeTransaction(gymAccount, payId, { type: txType, ...f }); _tx = { recorded: ['recorded','updated','exists'].includes(r.status), ...r, txType, payId, gymAccount, gymId: f.gym_id, memberId: f.member_id }; }
+      else { await bindBuyerForSession(stripe, session, gymAccount, payId); const r = await recordStripeTransaction(gymAccount, payId, { type: txType, ...f }); _tx = { recorded: ['recorded','updated','exists'].includes(r.status), ...r, txType, payId, gymAccount, gymId: f.gym_id, memberId: f.member_id }; }
     } catch (e) { _tx = { recorded: false, reason: 'exception: ' + e.message }; }
 
     // ---- referral credit consumption (idempotent backstop for a non-delivering webhook) ----

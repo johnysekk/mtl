@@ -22,7 +22,7 @@ function _end(b, okUrl, cancelUrl) {
 async function _out(req, session, acct) {
   if (session.ui_mode !== 'embedded') return { url: session.url };
   await ensurePmDomain(stripe, req.headers.host, acct);   // Apple Pay / Google Pay ve vloženém formuláři
-  return { clientSecret: session.client_secret, publishableKey: process.env.STRIPE_PUBLISHABLE_KEY, stripeAccount: acct };
+  return { clientSecret: session.client_secret, sessionId: session.id, publishableKey: process.env.STRIPE_PUBLISHABLE_KEY, stripeAccount: acct };
 }
 
 async function sbGet(path) {
@@ -176,8 +176,7 @@ export default async function handler(req, res) {
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
         payment_method_types: ['card'],
-        billing_address_collection: 'required',
-        tax_id_collection: { enabled: true },
+        billing_address_collection: 'auto',
         ..._end(b, `${proto}://${host}/?cohort=${encodeURIComponent(mem.cohort_id)}&firstmonth=ok&m=${_nM}&cm=${encodeURIComponent(cmId)}&session={CHECKOUT_SESSION_ID}`, `${proto}://${host}/?cohortpay=${encodeURIComponent(cmId)}`),
         customer_email: mem.email || undefined,
         metadata: { mtl_payment_type: 'cohort_first_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_currency: cur, mtl_welcome: wz ? '1' : '0', mtl_rate: String(rate), mtl_months: String(_nM) },
@@ -223,8 +222,7 @@ export default async function handler(req, res) {
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
         payment_method_types: ['card'],
-        billing_address_collection: 'required',
-        tax_id_collection: { enabled: true },
+        billing_address_collection: 'auto',
         ..._end(b, `${proto}://${host}/?cohort=${encodeURIComponent(mem.cohort_id)}&monthpaid=ok&cm=${encodeURIComponent(cmId)}&session={CHECKOUT_SESSION_ID}`, `${proto}://${host}/?cohortpay=${encodeURIComponent(cmId)}`),
         customer_email: mem.email || undefined,
         metadata: { mtl_payment_type: 'cohort_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_currency: cur, mtl_welcome: wz ? '1' : '0', mtl_rate: String(rate), mtl_month: String(lastMonth), mtl_months: String(_nM) },
@@ -481,8 +479,7 @@ export default async function handler(req, res) {
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       payment_method_types: ['card'],
-      billing_address_collection: 'required',
-      tax_id_collection: { enabled: true },
+      billing_address_collection: 'auto',
       ..._end(b, success_url, cancel_url),
       customer_email: email,
       metadata: { mtl_payment_type: 'cohort_deposit', cohort_id: String(cohortId), cohort_member_id: String(memberId || ''), mtl_currency: cur, tier, mtl_welcome: wz ? '1' : '0', mtl_rate: String(rate) },
