@@ -153,6 +153,15 @@ export default async function handler(req, res) {
     // partner = platba Exclusive Partnera směrem k MTL; tu pozastavení blokovat nesmí,
     // jinak by se poskytovatel nedostal z dluhu ven.
     if (type !== 'partner' && type !== 'partner_change' && type !== 'supplier' && type !== 'att_disc' && !(await _assertNotSuspended(req, res))) return;
+    // POZASTAVENÝ / ZABANOVANÝ KUPUJÍCÍ (Admin → Uživatelé) nic nekupuje. Poskytovatel si dluh MTL
+    // (partner, supplier) zaplatit smí.
+    if (type !== 'partner' && type !== 'partner_change' && type !== 'supplier' && type !== 'att_disc') {
+      const _bu = await _authUser(req);
+      if (_bu) {
+        const _bp = ((await _wsbGet(`profiles?id=eq.${encodeURIComponent(_bu.id)}&select=suspended,banned`)) || [])[0];
+        if (_bp && (_bp.suspended || _bp.banned)) return res.status(403).json({ error: 'Tvůj účet je pozastavený administrátorem MTL — teď nemůžeš nic kupovat. Důvod najdeš v notifikacích.' });
+      }
+    }
     if (type === 'att_disc')   return await attDiscInfo(req, res);
     if (type === 'coach')      return await coachCheckout(req, res);
     if (type === 'gym')        return await gymCheckout(req, res);
