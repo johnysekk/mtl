@@ -11,8 +11,9 @@
 // GET /api/geo-search?q=Cejl%2068&city=Brno&lang=cs&cc=cz&kind=address|place
 // → [{ display_name, lat, lon, address:{...}, boundingbox, precision, provider }, ...]
 // kind=place: jen obce, městské části a čtvrti (výběr města / místa v poptávce).
+// kind=postal: PSČ / ZIP v zemi cc → [{ lat, lng, postal, city, state, cc, precision:'postcode' }] (USA místo městských částí).
 // Kdo odpovídá (OpenStreetMap, LocationIQ, Mapbox, Google), určuje _geo-provider.js.
-import { geoSearch, providerName } from './_geo-provider.js';
+import { geoSearch, geoPostal, providerName } from './_geo-provider.js';
 
 // Paměť procesu. Vercel funkce žijí krátce, takže je to malá, ale účinná pojistka proti
 // opakovaným dotazům při psaní. Bez limitu by tu při dlouhém běhu narůstal objem.
@@ -50,6 +51,23 @@ export default async function handler(req, res) {
   const kind = ['place', 'city'].includes(req.query && req.query.kind) ? req.query.kind : null;
   const nlat = parseFloat(req.query && req.query.lat), nlng = parseFloat(req.query && req.query.lon);
   const near = (isFinite(nlat) && isFinite(nlng)) ? { lat: nlat, lng: nlng } : null;
+
+  if (req.query && req.query.kind === 'postal') {
+    const pkey = 'postal|' + providerName() + '|' + cc + '|' + q.toUpperCase();
+    const ph = cacheGet(pkey);
+    if (ph) { res.setHeader('Cache-Control', 'public, max-age=86400'); return res.status(200).json(ph); }
+    try {
+      const x = await geoPostal(q, { cc: cc.split(',')[0] });
+      const out = x ? [x] : [];
+      cacheSet(pkey, out);
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      return res.status(200).json(out);
+    } catch (e) {
+      console.error('[geo-search postal]', providerName(), (e && e.status) || '', (e && e.message) || e);
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(502).json({ error: 'geocoder_unavailable' });
+    }
+  }
 
   // Krátké dotazy nemá smysl posílat dál: vrátí půl města a stejně se přepisují.
   if (q.length < 3) { res.setHeader('Cache-Control', 'no-store'); return res.status(200).json([]); }

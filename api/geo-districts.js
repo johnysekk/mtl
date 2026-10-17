@@ -10,7 +10,10 @@
 //   * Z celků pod městem se vezme NEJHRUBŠÍ úroveň správního členění (admin_level), která má
 //     aspoň 2 části -- to je „městská část" v dané zemi (CZ obvody/MČ, DE Stadtbezirke,
 //     FR arrondissements, AT Bezirke, USA boroughs u New Yorku…). Jemnější úrovně se nikdy neberou.
-//   * Víc než MAX_PARTS částí = to není městská část, ale něco jemnějšího → nic, jen celé město.
+//   * Nejvýš MAX_PARTS (30) částí -- největších. Velikost = počet obyvatel z mapy, když ho mají
+//     všechny části, jinak rozloha (obdélník, do kterého se část vejde). Brno má 29 městských
+//     částí, Praha 22 obvodů, Berlín 12 obvodů -- ty se vejdou celé; kde je jich víc, zůstane 30
+//     největších.
 //
 // Rychlost (Overpass je pomalý, dotaz na velké město trvá i desítky sekund):
 //   1) trvalá cache v databázi (public.geo_district_cache) -- každé město se počítá jednou
@@ -30,7 +33,7 @@ const OVERPASS = (process.env.OVERPASS_URL || 'https://overpass-api.de/api/inter
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const AREA = 3600000000;
-const MAX_PARTS = 80;
+const MAX_PARTS = 30;
 const CACHE_DAYS = 90;
 
 const MEM = new Map();
@@ -100,24 +103,45 @@ function sameName(tags, city) {
   return false;
 }
 
-// Z kandidátů vybere nejhrubší úroveň pod městem s aspoň 2 částmi.
+// Střed a velikost z obdélníku (out bb). Rozloha ve stupních² s korekcí na zeměpisnou šířku --
+// stačí na porovnání částí téhož města.
+function centerOf(el) {
+  if (el.center) return { lat: el.center.lat, lon: el.center.lon };
+  const b = el.bounds;
+  if (!b) return null;
+  return { lat: (b.minlat + b.maxlat) / 2, lon: (b.minlon + b.maxlon) / 2 };
+}
+function areaOf(el) {
+  const b = el.bounds;
+  if (!b) return 0;
+  return Math.abs(b.maxlat - b.minlat) * Math.abs(b.maxlon - b.minlon) * Math.cos(((b.minlat + b.maxlat) / 2) * Math.PI / 180);
+}
+
+// Z kandidátů vybere nejhrubší úroveň pod městem s aspoň 2 částmi; nejvýš MAX_PARTS největších.
 function pickLevel(cands, cityLevel, city, lang) {
   const byLevel = {};
   for (const el of cands) {
-    if (!el.center) continue;
+    const c = centerOf(el);
+    if (!c) continue;
     const t = el.tags || {};
     if (t.boundary !== 'administrative') continue;
     const lv = parseInt(t.admin_level, 10);
     if (!(lv > cityLevel && lv <= 11)) continue;
     const name = String(t['name:' + lang] || t.name || '').trim();
     if (!name || (city && name.toLowerCase() === city.toLowerCase())) continue;
-    (byLevel[lv] = byLevel[lv] || []).push({ name, lat: Math.round(el.center.lat * 1e5) / 1e5, lng: Math.round(el.center.lon * 1e5) / 1e5 });
+    const pop = parseInt(String(t.population || '').replace(/[^0-9]/g, ''), 10);
+    (byLevel[lv] = byLevel[lv] || []).push({ name, lat: Math.round(c.lat * 1e5) / 1e5, lng: Math.round(c.lon * 1e5) / 1e5,
+      _pop: pop > 0 ? pop : 0, _area: areaOf(el) });
   }
   const lv = Object.keys(byLevel).map(Number).sort((a, b) => a - b).find((l) => byLevel[l].length >= 2);
   if (!lv) return [];
   const seen = {};
-  const out = byLevel[lv].filter((p) => { const k = p.name.toLowerCase(); if (seen[k]) return false; seen[k] = 1; return true; });
-  if (out.length > MAX_PARTS) return [];
+  let out = byLevel[lv].filter((p) => { const k = p.name.toLowerCase(); if (seen[k]) return false; seen[k] = 1; return true; });
+  if (out.length > MAX_PARTS) {
+    const byPop = out.every((p) => p._pop > 0);
+    out = out.sort((a, b) => (byPop ? b._pop - a._pop : b._area - a._area)).slice(0, MAX_PARTS);
+  }
+  out = out.map((p) => ({ name: p.name, lat: p.lat, lng: p.lng }));
   out.sort((a, b) => a.name.localeCompare(b.name, lang || 'cs', { numeric: true }));
   return out;
 }
@@ -132,7 +156,7 @@ async function findCityRel(lat, lon, city) {
 
 async function compute(id, city, lang) {
   // RYCHLÁ CESTA: části zapsané v relaci města.
-  const d1 = await overpass(`[out:json][timeout:15];rel(${id})->.c;.c out tags;rel(r.c:"subarea");out center tags;`, 15000);
+  const d1 = await overpass(`[out:json][timeout:15];rel(${id})->.c;.c out tags;rel(r.c:"subarea");out bb tags;`, 15000);
   const e1 = (d1 && d1.elements) || [];
   const c1 = e1.find((e) => e.type === 'relation' && e.id === id);
   if (!c1) return [];
@@ -142,13 +166,13 @@ async function compute(id, city, lang) {
 
   // POMALÁ CESTA: hranice uvnitř města, s kontrolou polohy.
   const d2 = await overpass(`[out:json][timeout:25];rel(${id})->.c;.c out tags geom;`
-    + `area(${AREA + id})->.a;rel(area.a)["boundary"="administrative"]["admin_level"~"^(${cityLevel + 1}|${cityLevel + 2}|${cityLevel + 3})$"]["name"];out center tags;`, 25000);
+    + `area(${AREA + id})->.a;rel(area.a)["boundary"="administrative"]["admin_level"~"^(${cityLevel + 1}|${cityLevel + 2}|${cityLevel + 3})$"]["name"];out bb tags;`, 25000);
   const e2 = (d2 && d2.elements) || [];
   const c2 = e2.find((e) => e.type === 'relation' && e.id === id && Array.isArray(e.members));
   if (!c2) return [];
   const segs = ringSegments(c2);
   if (segs.length < 3) return [];
-  return pickLevel(e2.filter((e) => e !== c2 && e.id !== id && e.center && inside(segs, e.center.lon, e.center.lat)), cityLevel, city, lang);
+  return pickLevel(e2.filter((e) => { if (e === c2 || e.id === id) return false; const c = centerOf(e); return !!c && inside(segs, c.lon, c.lat); }), cityLevel, city, lang);
 }
 
 export default async function handler(req, res) {
@@ -178,7 +202,7 @@ export default async function handler(req, res) {
     }
     if (!(id > 0)) return send([]);
 
-    const key = `r${id}|${lang}`;
+    const key = `v2|r${id}|${lang}`;
     const m = MEM.get(key);
     if (m && Date.now() - m.at < MEM_TTL) return send(m.data);
     const stored = await dbGet(key);

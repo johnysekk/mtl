@@ -46,7 +46,16 @@ export default async function handler(req, res) {
         const prow = pr.ok ? await pr.json() : [];
         _isFounder = !!(prow[0] && prow[0].role === 'founder');
       } catch (e) {}
-      if (!_isFounder) return res.status(403).json({ error: 'not owner' });
+      // Spolumajitel vidí čísla klubu stejně jako majitel (v appce _isGymBoss).
+      let _coOwner = false;
+      if (!_isFounder) {
+        try {
+          const cr = await fetch(`${SB}/rest/v1/gym_coaches?gym_id=eq.${encodeURIComponent(gymId)}&coach_id=eq.${encodeURIComponent(uid)}&status=eq.active&co_owner=is.true&select=id&limit=1`, { headers: svc });
+          const crow = cr.ok ? await cr.json() : [];
+          _coOwner = !!(crow && crow.length);
+        } catch (e) {}
+      }
+      if (!_isFounder && !_coOwner) return res.status(403).json({ error: 'not owner' });
     }
 
     // 3) read the gym's transactions via the service role (bypasses RLS)

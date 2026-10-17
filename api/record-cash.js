@@ -659,6 +659,28 @@ export default async function handler(req, res) {
     if (type === 'course' && String(payment_method || '') === 'qr' && b.cohort_member_id) {
       try { const _cp = await _wsbGet(`cohort_payments?cohort_member_id=eq.${encodeURIComponent(b.cohort_member_id)}&select=id&limit=1`); _skipMail = !(_cp && _cp.length); } catch (e) {}
     }
+    // ROZPAD PLATEB KURZU (cohort_payments: „Co zaplatil", přehled kurzu, výnosy MTL) zapisuje
+    // server ze stejné transakce -- částka i provize MTL jsou ty skutečné. Dřív ho zapisoval klub
+    // z prohlížeče i s provizí. PIS (_trusted) si řádek zapisuje pis-return sám.
+    if (!_trusted && _txId && type === 'course' && b.cohort_member_id) {
+      try {
+        const _cmid = encodeURIComponent(b.cohort_member_id);
+        const _kind = income_class === 'cohort_month' ? 'month' : (income_class === 'cohort_first_month' ? 'first_month' : 'deposit');
+        const _cm = (await _wsbGet(`cohort_members?id=eq.${_cmid}&select=id,cohort_id,paid_amount`))[0] || null;
+        const _cohId = cohort_id || (_cm && _cm.cohort_id) || null;
+        const _paidBefore = Number((_cm && _cm.paid_amount) || 0);
+        if (_kind !== 'month' && _paidBefore > 0) {
+          const _dep = await _wsbGet(`cohort_payments?cohort_member_id=eq.${_cmid}&kind=eq.deposit&select=id&limit=1`);
+          if (!(_dep && _dep.length)) {
+            await sb('cohort_payments', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ cohort_member_id: b.cohort_member_id, cohort_id: _cohId, kind: 'deposit', amount: _paidBefore, currency: cur, status: 'paid' }) });
+          }
+        }
+        await sb('cohort_payments', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({
+          cohort_member_id: b.cohort_member_id, cohort_id: _cohId, kind: _kind, amount: gross / 100,
+          months: Math.max(1, parseInt(months, 10) || 1), currency: cur, payment_method,
+          mtl_fee: Number(row.mtl_fee || 0) / 100, status: 'paid' }) });
+      } catch (e) { console.error('[record-cash] cohort_payments', e && e.message); }
+    }
     if (_txId && !_skipMail) { try { await sendOrderMail(_txId); } catch (e) { console.error('order mail', e.message); } }
     return res.status(200).json({ ok: true, mtl_fee: row.mtl_fee, credit_redeemed: !!_creditRow, id: _txId, doklad_no: _dokNo });
   } catch (e) {

@@ -265,6 +265,47 @@ export async function geoReverse(lat, lon, o = {}) {
   else out = await osmReverse(lat, lon, opt, 'https://nominatim.openstreetmap.org', null);
   return Object.assign(out, { provider: p });
 }
+// PSČ / ZIP → bod (střed oblasti PSČ). Kde města nemají městské části (USA), je to jediný
+// způsob, jak dostat přesný bod: střed Los Angeles je od okrajů města i 30 km, a párování
+// poptávky s klubem běží na 20 km. Vrací null, když PSČ v té zemi neexistuje.
+export async function geoPostal(postal, o = {}) {
+  const cc = String(o.cc || '').toLowerCase().replace(/[^a-z]/g, '').slice(0, 2);
+  const pc = String(postal || '').trim().toUpperCase().replace(/[^A-Z0-9 -]/g, '').slice(0, 12);
+  if (!cc || pc.replace(/[^A-Z0-9]/g, '').length < 3) return null;
+  const pr = providerName();
+  let rows = [];
+  if (pr === 'mapbox') {
+    const p = new URLSearchParams({ q: pc, access_token: process.env.MAPBOX_TOKEN, types: 'postcode', country: cc, limit: '1' });
+    if (process.env.MAPBOX_PERMANENT === '1') p.set('permanent', 'true');
+    const r = await fetch(`https://api.mapbox.com/search/geocode/v6/forward?${clean(p)}`);
+    if (!r.ok) { const e = new Error('geocoder_unavailable'); e.status = r.status; throw e; }
+    const d = await r.json();
+    rows = ((d && d.features) || []).map(mbToNom);
+  } else if (pr === 'google') {
+    const p = new URLSearchParams({ components: `postal_code:${pc}|country:${cc.toUpperCase()}`, key: process.env.GOOGLE_GEO_KEY });
+    const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?${clean(p)}`);
+    if (!r.ok) { const e = new Error('geocoder_unavailable'); e.status = r.status; throw e; }
+    const d = await r.json();
+    if (d.status && !['OK', 'ZERO_RESULTS'].includes(d.status)) { const e = new Error('geocoder_unavailable'); e.status = 502; throw e; }
+    rows = ((d && d.results) || []).slice(0, 1).map(gToNom);
+  } else {
+    const key = pr === 'locationiq' ? process.env.LOCATIONIQ_KEY : null;
+    const base = key ? 'https://us1.locationiq.com/v1' : 'https://nominatim.openstreetmap.org';
+    const p = new URLSearchParams({ format: 'json', addressdetails: '1', limit: '1', postalcode: pc, countrycodes: cc });
+    if (key) p.set('key', key); else await nomThrottle();
+    const r = await fetch(`${base}/search?${clean(p)}`, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
+    if (!r.ok) { const e = new Error('geocoder_unavailable'); e.status = r.status; throw e; }
+    const d = await r.json();
+    rows = (Array.isArray(d) ? d : []).map((x) => ({ display_name: x.display_name, lat: x.lat, lon: x.lon, address: x.address || {} }));
+  }
+  const x = rows.find((r) => _ccOk(r, cc) && isFinite(parseFloat(r.lat)) && isFinite(parseFloat(r.lon)));
+  if (!x) return null;
+  const a = x.address || {};
+  return { lat: parseFloat(x.lat), lng: parseFloat(x.lon), postal: pc,
+    city: a.city || a.town || a.village || a.hamlet || a.municipality || null, state: a.state || null,
+    cc: cc.toUpperCase(), precision: 'postcode', provider: pr };
+}
+
 // Bod pro adresu / město v dané zemi: nejdřív přesná adresa, pak město. NIKDY střed státu --
 // klub uprostřed země by rozbil všechny vzdálenosti. Vrací null, když nic nesedí.
 export async function geoLocate({ street, city, postal, cc, lang }) {
