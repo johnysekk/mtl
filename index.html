@@ -2720,7 +2720,8 @@ input[type="date"]::-webkit-date-and-time-value{ text-align:left; }
   <div style="padding:18px 20px 44px;">
     <p style="font-size:12.5px;color:var(--mid);line-height:1.55;margin:0 0 16px;" id="dangerHint">Změny tady se týkají celého účtu. Deaktivace je vratná, zrušení po 30 dnech ne.</p>
 
-      <div style="font-size:11px;font-weight:700;color:var(--light);letter-spacing:.08em;margin-bottom:10px;">⚠️ NEBEZPEČNÁ ZÓNA</div>
+      <div id="dangerEntities"></div>
+      <div style="font-size:11px;font-weight:700;color:var(--light);letter-spacing:.08em;margin-bottom:10px;display:none;">⚠️ NEBEZPEČNÁ ZÓNA</div>
       <button id="setDelCoach" style="display:none;width:100%;padding:12px 14px;background:var(--surf);color:var(--red);border:1px solid #F3C9C0;border-radius:11px;font-size:14px;font-weight:600;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;text-align:left;">Smazat profil kouče</button>
       <button id="setDelGym" style="display:none;width:100%;padding:12px 14px;background:var(--surf);color:var(--red);border:1px solid #F3C9C0;border-radius:11px;font-size:14px;font-weight:600;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;text-align:left;">Smazat profil klubu</button>
       <button id="setDeactivate" style="width:100%;padding:12px 14px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:11px;font-size:14px;font-weight:600;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;text-align:left;"><span id="setDeactLbl">Deaktivovat účet</span><br><span id="setDeactSub" style="font-size:11.5px;font-weight:400;color:var(--mid);">Zmizíš odevšad. Nic se nemaže. Kdykoli zpět.</span></button>
@@ -6880,6 +6881,51 @@ if(_IS_TEST_HOST && !(_SUPA_TEST.url && _SUPA_TEST.key)){
 const SUPA_URL = _IS_TEST_HOST ? _SUPA_TEST.url : _SUPA_PROD.url;
 const SUPA_KEY = _IS_TEST_HOST ? _SUPA_TEST.key : _SUPA_PROD.key;
 const supaClient = window.supabase.createClient(SUPA_URL, SUPA_KEY);
+// ── OFFLINE (sw.js) ──────────────────────────────────────────────────────────────────────────
+// Appka se otevře i bez internetu / při výpadku MTL a ukáže poslední načtená data (rezervace,
+// rozvrh, permanentka, vstupenky a Karta MTL s QR). Nic se offline neukládá ani neodkládá --
+// proužek dole to řekne. Uložená data patří přihlášenému: při odhlášení / jiném účtu se smažou.
+(function(){
+  let _offBar=null, _offKind=null;
+  const paint=function(kind){
+    try{
+      _offKind=kind;
+      if(!kind){ if(_offBar) _offBar.style.display='none'; return; }
+      if(!_offBar){ _offBar=document.createElement('div'); _offBar.id='mtlOfflineBar';
+        _offBar.style.cssText='position:fixed;left:50%;transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom,0px) + 74px);z-index:2147481000;max-width:min(560px,calc(100vw - 24px));box-sizing:border-box;background:#1f2937;color:#fff;border-radius:14px;padding:10px 14px;font:600 12.5px/1.45 "DM Sans",sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.25);';
+        document.body.appendChild(_offBar); }
+      const EN=(typeof LANG!=='undefined' && LANG==='en');
+      _offBar.textContent = kind==='net'
+        ? (EN?'\ud83d\udcf4 You are offline — you see the last saved data. Bookings, payments and changes do not work right now.':'\ud83d\udcf4 Jsi offline — vidíš poslední uložená data. Rezervace, platby a změny teď nejdou.')
+        : (EN?'\u26a0\ufe0f MTL is unavailable right now — you see the last saved data. Bookings, payments and changes do not work until it is back.':'\u26a0\ufe0f MTL je teď nedostupné — vidíš poslední uložená data. Rezervace, platby a změny půjdou, až se to vrátí.');
+      _offBar.style.display='block';
+    }catch(e){}
+  };
+  window._mtlOffline=function(){ return !!_offKind; };
+  try{
+    window.addEventListener('offline', function(){ paint('net'); });
+    window.addEventListener('online', function(){ paint(null); });
+    if(navigator.onLine===false) setTimeout(function(){ paint('net'); }, 300);
+  }catch(e){}
+  const native=(function(){ try{ return !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()); }catch(e){ return false; } })();
+  if('serviceWorker' in navigator && location.protocol==='https:' && !native){
+    window.addEventListener('load', function(){ navigator.serviceWorker.register('/sw.js').catch(function(e){ console.warn('[sw]', e&&e.message); }); });
+    navigator.serviceWorker.addEventListener('message', function(ev){
+      const t=ev && ev.data && ev.data.type;
+      if(t==='mtl-offline') paint(navigator.onLine===false?'net':'mtl');
+      if(t==='mtl-online' && _offKind!=='net') paint(null);
+    });
+  }
+  // Uložená data patří tomu, kdo je přihlášený.
+  // Komu data v paměti patří, si appka pamatuje i přes zavření (localStorage): jiný účet = smazat.
+  const _clearData=function(){ try{ if(navigator.serviceWorker && navigator.serviceWorker.controller) navigator.serviceWorker.controller.postMessage('mtl-clear-data'); }catch(e){} try{ if(window.caches) caches.delete('mtl-data-v1'); }catch(e){} };
+  try{ supaClient.auth.onAuthStateChange(function(evt, session){
+    const uid=(session && session.user && session.user.id)||null;
+    let prev=null; try{ prev=localStorage.getItem('mtl_sw_uid'); }catch(e){}
+    if(evt==='SIGNED_OUT'){ _clearData(); try{ localStorage.removeItem('mtl_sw_uid'); }catch(e){} return; }
+    if(uid && prev!==uid){ _clearData(); try{ localStorage.setItem('mtl_sw_uid', uid); }catch(e){} }
+  }); }catch(e){}
+})();
 // FILTR NA TERMÍN LEKCE: dotaz.occ(termín) = datum + stálé ID lekce (class_id). Termín bez ID
 // (starší notifikace, lekce mimo rozvrh) se hledá postaru podle času a názvu. Přidává se na
 // společný prototyp dotazů, takže funguje u select / delete / update stejně.
@@ -6994,7 +7040,7 @@ async function loadCoaches() {
     data = r.data; error = r.error;
     if(error){ // PostGIS not deployed yet -> graceful fallback to the old bounding box
       const _BOX = 6; _coachCenter = null;
-      const fb = await supaClient.from('profiles_pub').select('*').eq('coach_status','approved').is('deleted_at', null).or('and(city_lat.gte.'+(ulat-_BOX)+',city_lat.lte.'+(ulat+_BOX)+',city_lng.gte.'+(ulng-_BOX)+',city_lng.lte.'+(ulng+_BOX)+'),city_lat.is.null').limit(2000);
+      const fb = await supaClient.from('profiles_pub').select('*').eq('coach_status','approved').is('deleted_at', null).is('coach_paused_at', null).is('coach_closing_at', null).is('deactivated_at', null).or('and(city_lat.gte.'+(ulat-_BOX)+',city_lat.lte.'+(ulat+_BOX)+',city_lng.gte.'+(ulng-_BOX)+',city_lng.lte.'+(ulng+_BOX)+'),city_lat.is.null').limit(2000);
       data = fb.data; error = fb.error;
     }
   } else if(_uCC || ucountry){
@@ -7002,11 +7048,11 @@ async function loadCoaches() {
     // jsou názvy anglicky (sql-66) -- tahle větev tedy v české appce nevracela ani jednoho
     // kouče. _deckCountryOr matchuje kód i oba názvy, takže projde i starší řádek bez kódu.
     const _or=(typeof _deckCountryOr==='function' && _uCC) ? _deckCountryOr(_uCC) : null;
-    let _q = supaClient.from('profiles_pub').select('*').eq('coach_status','approved').is('deleted_at', null);
+    let _q = supaClient.from('profiles_pub').select('*').eq('coach_status','approved').is('deleted_at', null).is('coach_paused_at', null).is('coach_closing_at', null).is('deactivated_at', null);
     _q = _or ? _q.or(_or) : _q.eq('country', ucountry);
     const r = await _q.limit(2000); data=r.data; error=r.error;
   } else {
-    const r = await supaClient.from('profiles_pub').select('*').eq('coach_status','approved').is('deleted_at', null).limit(1000); data=r.data; error=r.error;
+    const r = await supaClient.from('profiles_pub').select('*').eq('coach_status','approved').is('deleted_at', null).is('coach_paused_at', null).is('coach_closing_at', null).is('deactivated_at', null).limit(1000); data=r.data; error=r.error;
   }
 
   if (error) { console.error('Supabase error:', error); toast(L('⚠️ Chyba načítání')); return; }
@@ -7293,6 +7339,9 @@ function _vatIdErr(cc, v){
 }
 function toast(msg, keepEmoji){
   // Chyby kontroly v databázi lidsky (kterékoli ukládání, které chybu jen vypíše).
+  try{ if(/Failed to fetch|NetworkError|Load failed|network error/i.test(String(msg||''))){ msg='\ud83d\udcf4 '+(LANG==='en'?'No connection — nothing was saved. Try again when you are back online.':'Bez připojení — nic se neuložilo. Zkus to znovu, až budeš online.'); keepEmoji=true; } }catch(e){}
+  try{ if(/\bno_reply\b/.test(String(msg||''))){ msg='\u26a0\ufe0f '+(LANG==='en'?'You cannot reply to a message from MTL — if needed, write to Support.':'Na zprávu od MTL nejde odpovědět — v případě nutnosti napiš na Podporu.'); keepEmoji=true; } }catch(e){}
+  try{ if(/provider_closed/.test(String(msg||''))){ msg='\u26a0\ufe0f '+(LANG==='en'?'This provider is not selling anything in MTL right now (paused or leaving).':'Tenhle poskytovatel teď v MTL nic neprodává (pozastavil nebo ruší profil).'); keepEmoji=true; } }catch(e){}
   try{ const _m=String(msg||''); if(/invalid_tax_id/.test(_m)) msg='\u26a0\ufe0f '+(LANG==='en'?'The company ID (I\u010cO) is not valid for the selected country.':'I\u010cO nen\u00ed platn\u00e9 pro zvolenou zemi \u2014 zkontroluj ho.'); else if(/invalid_vat_id/.test(_m)) msg='\u26a0\ufe0f '+(LANG==='en'?'The VAT ID is not valid for the selected country.':'DI\u010c nen\u00ed platn\u00e9 pro zvolenou zemi \u2014 za\u010d\u00edn\u00e1 k\u00f3dem zem\u011b.'); }catch(e){}
   const el = $('toast');
   if(keepEmoji){ el.setAttribute('data-keep-emoji','1'); } else { el.removeAttribute('data-keep-emoji'); if(_emojiOff()){ var _st=_stripEmojiStr(msg); if(_st.trim()!=='') msg=_st; } }
@@ -8659,7 +8708,7 @@ async function _stripeLink(body){
 }
 async function _loadGymGeo(){
   if(window._gymGeo) return window._gymGeo;
-  try{ var r=await supaClient.from('gyms').select('city_lat,city_lng,disciplines').eq('status','approved'); window._gymGeo=(r.data||[]).map(function(g){ return { lat:(g.city_lat!=null?+g.city_lat:null), lng:(g.city_lng!=null?+g.city_lng:null), discs:(typeof parseDisc==='function'?parseDisc(g.disciplines):[]) }; }).filter(function(g){ return g.lat!=null&&g.lng!=null; }); }catch(e){ window._gymGeo=[]; }
+  try{ var r=await supaClient.from('gyms').select('city_lat,city_lng,disciplines').eq('status','approved').is('deleted_at',null).is('paused_at',null); window._gymGeo=(r.data||[]).map(function(g){ return { lat:(g.city_lat!=null?+g.city_lat:null), lng:(g.city_lng!=null?+g.city_lng:null), discs:(typeof parseDisc==='function'?parseDisc(g.disciplines):[]) }; }).filter(function(g){ return g.lat!=null&&g.lng!=null; }); }catch(e){ window._gymGeo=[]; }
   return window._gymGeo;
 }
 function _gymsNearDisc(lat,lng,disc){ if(lat==null||lng==null||!window._gymGeo) return null; var n=0; window._gymGeo.forEach(function(g){ if((g.discs||[]).indexOf(disc)<0) return; if(haversine(lat,lng,g.lat,g.lng)<=20) n++; }); return n; }
@@ -9364,7 +9413,7 @@ function _offerAbroad(kind){
 // se select('*') to bylo tiché, ve výčtu by to shodilo celý dotaz). Do výčtu proto nepatří.
 // PROVOZNI RAD PATRI DO VYBERU. _mtlPayReady se pta na terms_text/terms_file_url/org_form,
 // jenze deck je nenacital -- test je videl prazdne a klub s vyplnenym radem z decku zmizel.
-const GYM_DECK_COLS = 'id,name,city,country,city_lat,city_lng,photos,disciplines,dropin_price,membership_price,owner_id,currency,venue_type,schedule,capacity,payment_mode,stripe_account,receiver_id_value,commission_card_status,account_suspended,cert_level,created_at,description,status,suspended,deleted_at,receiver_name,takes_cash,legal_name,tax_id,billing_city,billing_country,charges_enabled,billing_line1,billing_postal,trial_classes,terms_text,terms_file_url,member_app_file_url,org_form,sponsors,memb_calendar';   // trial_classes: odznak „1. trénink zdarma" v decku
+const GYM_DECK_COLS = 'id,name,city,country,city_lat,city_lng,photos,disciplines,dropin_price,membership_price,owner_id,currency,venue_type,schedule,capacity,payment_mode,stripe_account,receiver_id_value,commission_card_status,account_suspended,cert_level,created_at,description,status,suspended,deleted_at,paused_at,receiver_name,takes_cash,legal_name,tax_id,billing_city,billing_country,charges_enabled,billing_line1,billing_postal,trial_classes,terms_text,terms_file_url,member_app_file_url,org_form,sponsors,memb_calendar';   // trial_classes: odznak „1. trénink zdarma" v decku
 // ═══ UMÍ PRODÁVAT ══════════════════════════════════════════════════════════════════════
 // Jedna podmínka pro kouče, klub i organizaci. Dřív existovala jen pro kouče (_coachNotReady)
 // a hlídala pouze výplatní kanál; kluby se v decku ukazovaly i bez možnosti zaplatit, takže
@@ -9533,7 +9582,7 @@ async function loadMoreGyms(){
     const have = new Set(GYMS.map(x=>x.id));
     // Stejná pravidla jako první stránka -- dřív další stránky pouštěly do decku i klub bez plateb.
     try{ const _ids=data.map(function(x){ return x.id; }); const { data:_oc }=await supaClient.from('gym_cohorts').select('gym_id').in('gym_id',_ids).eq('status','open'); const _os=new Set((_oc||[]).map(function(x){ return String(x.gym_id); })); data.forEach(function(x){ if(_os.has(String(x.id))) x._openCourse=true; }); }catch(e){}
-    const add = data.filter(g=>!g.suspended && !g.deleted_at && !have.has(g.id) && canSell(g,'gym'));
+    const add = data.filter(g=>!g.suspended && !g.deleted_at && !g.paused_at && !have.has(g.id) && canSell(g,'gym'));
     if(add.length){
       GYMS = GYMS.concat(add.map(_mapGymRow));
       try{ if(typeof init==='function') init(); }catch(e){}
@@ -9632,7 +9681,7 @@ async function ensureGymsLoaded(force){
     // Klub bez možnosti zaplatit do decku nepatří -- student by doklikal k rezervaci
     // a nedostal se dál.
     try{ const _ids=(data||[]).map(function(x){ return x.id; }); if(_ids.length){ const { data:_oc }=await supaClient.from('gym_cohorts').select('gym_id').in('gym_id',_ids).eq('status','open'); const _os=new Set((_oc||[]).map(function(x){ return String(x.gym_id); })); (data||[]).forEach(function(x){ if(_os.has(String(x.id))) x._openCourse=true; }); } }catch(e){}
-    const gyms=(data||[]).filter(g=>!g.suspended && !g.deleted_at && canSell(g,'gym'));
+    const gyms=(data||[]).filter(g=>!g.suspended && !g.deleted_at && !g.paused_at && canSell(g,'gym'));
     if(!data || data.length < _GYM_PAGE) _gymExhausted = true;
     GYMS=gyms.map(_mapGymRow);
     try{ const _oids=[...new Set(gyms.map(x=>x.owner_id).filter(Boolean))]; if(_oids.length){ const { data:_ow } = await supaClient.from('profiles').select('id,partner,partner_tier').in('id',_oids); const _opm={}; (_ow||[]).forEach(o=>_opm[o.id]=_epTierOf(o)); GYMS.forEach(c=>{ if(c.ownerId) c.ownerPartner=_opm[c.ownerId]||false; });   /* stupeň EP majitele (klíč) */ } }catch(e){}
@@ -10227,7 +10276,7 @@ async function loadFavorites(){
   let extra = [];
   if(missing.length){
     try{
-      const { data:rows } = await supaClient.from('profiles_pub').select('*').in('id', missing).eq('coach_status','approved').is('deleted_at', null);
+      const { data:rows } = await supaClient.from('profiles_pub').select('*').in('id', missing).eq('coach_status','approved').is('deleted_at', null).is('coach_paused_at', null).is('coach_closing_at', null).is('deactivated_at', null);
       extra = (rows||[]).filter(r=> !r.account_suspended && !(typeof window._coachNotReady==='function' && window._coachNotReady(r))).map(_mapCoachRow);
     }catch(e){}
   }
@@ -11448,6 +11497,9 @@ function openSheet(id){
   // ostatních sheetů hledají otevřený list jen v SHEETS -- list, který tam chyběl (Párování
   // plateb, Předplatné MTL, převod vlastnictví…), zůstal viset a nešlo z něj odejít.
   if(id && SHEETS.indexOf(id)<0 && $(id) && $(id).classList.contains('sheet')) SHEETS.push(id);
+  // Pozastavit / smazat: karta profilu v nastavení klubu a kouče, seznam ve Správě účtu.
+  try{ if(id==='shGymManage'||id==='shCoachSettings'||id==='shOrgApply') setTimeout(function(){ _closeInject(id); }, 400);
+       if(id==='shDanger') { _renderDangerList(); _closeRefresh(); } }catch(e){}
   _deckPhotoH();
   try{ if(id==='shGymManage' && $('shGymManage') && !$('shGymManage').classList.contains('open')) window._gmSetGroup=null; }catch(e){}
   // Otevírá se list z panelu Nastavení klubu? Zapamatovat si, který panel to byl -- po zavření
@@ -11546,7 +11598,7 @@ async function loadMoreEvents(){
   _evLoadingMore = true;
   try{
     const today=new Date(); today.setHours(0,0,0,0);
-    let q = supaClient.from('events').select('*').eq('status','approved').gte('starts_at', today.toISOString());
+    let q = supaClient.from('events').select('*').eq('status','approved').is('host_closed_at',null).gte('starts_at', today.toISOString());
     // Akce jen pro poskytovatele se studentovi vubec nenactou -- filtruje se na serveru,
     // ne az pri vykresleni, aby se v odpovedi neobjevily ani nazvy.
     if(!_isProviderUser()) q=q.or('providers_only.is.null,providers_only.eq.false');
@@ -11571,7 +11623,7 @@ async function renderEventsAsync(box){
   try{ const {data:cr}=await supaClient.from('gym_coaches').select('gym_id').eq('coach_id',currentUser.id).eq('status','active').eq('can_request_fighters',true); window._canReqF=!!(cr&&cr.length); window._reqFGym=(cr&&cr[0]&&cr[0].gym_id)||null; }catch(e){ window._canReqF=false; }
   try{
     const today=new Date(); today.setHours(0,0,0,0);
-    let _eq = supaClient.from('events').select('*').eq('status','approved').gte('starts_at', today.toISOString());
+    let _eq = supaClient.from('events').select('*').eq('status','approved').is('host_closed_at',null).gte('starts_at', today.toISOString());
     // Akce jen pro poskytovatele se studentovi vubec nenactou -- filtruje se na serveru,
     // ne az pri vykresleni, aby se v odpovedi neobjevily ani nazvy.
     if(!_isProviderUser()) _eq=_eq.or('providers_only.is.null,providers_only.eq.false');
@@ -12196,11 +12248,11 @@ function _evCohostPick(){
     if(q.length<2){ res.innerHTML='<p style="font-size:12.5px;color:var(--light);padding:6px 0;">'+(EN?'Type at least 2 letters.':'Napiš aspoň 2 písmena.')+'</p>'; return; }
     const my=++_seq; let items=[];
     try{
-      if(kind==='gym'){ const { data }=await supaClient.from('gyms').select('id,name,city,photos').eq('status','approved').ilike('name','%'+q+'%').limit(10);
+      if(kind==='gym'){ const { data }=await supaClient.from('gyms').select('id,name,city,photos').eq('status','approved').is('deleted_at',null).is('paused_at',null).ilike('name','%'+q+'%').limit(10);
         items=(data||[]).filter(function(g){ return String(g.id)!==String(hostGym); }).map(function(g){ let p=''; try{ p=gymFirstThumb(g.photos)||''; }catch(e){} return { kind:'gym', tid:g.id, name:g.name||'', sub:g.city||'', img:p }; }); }
       else if(kind==='coach'){ const { data }=await supaClient.from('profiles').select('id,name,city,photo_url,photo_thumb').eq('coach_status','approved').ilike('name','%'+q+'%').limit(10);
         items=(data||[]).filter(function(c){ return !(currentUser && String(c.id)===String(currentUser.id)); }).map(function(c){ return { kind:'coach', tid:c.id, name:c.name||'', sub:c.city||'', img:c.photo_thumb||c.photo_url||'' }; }); }
-      else { const { data }=await supaClient.from('organizations').select('id,name,abbr,logo_url,kind,city').eq('status','approved').in('kind',['federation','promotion']).or('name.ilike.%'+q+'%,abbr.ilike.%'+q+'%').limit(10);
+      else { const { data }=await supaClient.from('organizations').select('id,name,abbr,logo_url,kind,city').eq('status','approved').is('deleted_at',null).is('paused_at',null).in('kind',['federation','promotion']).or('name.ilike.%'+q+'%,abbr.ilike.%'+q+'%').limit(10);
         items=(data||[]).filter(function(o){ return String(o.id)!==String(hostOrg); }).map(function(o){ return { kind:'org', tid:o.id, name:o.name||o.abbr||'', sub:[o.abbr, _orgKindLbl(o.kind), o.city].filter(Boolean).join(' · '), img:o.logo_url||'' }; }); }
     }catch(e){ items=[]; }
     if(my!==_seq) return;
@@ -13592,11 +13644,13 @@ function _evPubQr(d, tier, ticketId, name, ov, qty, total){
   { const _pb=ov.querySelector('#evPubPis'); if(_pb) _pb.onclick=function(){ _pisPayFlow(ticketId, payee, null, price, cur, msg, function(){ _evPubClose(ov); }, function(){ const w=ov.querySelector('#evPubQrWrap'); if(w) w.style.display=''; const pd=ov.querySelector('#evPubPaid'); if(pd) pd.style.display=''; }, 'event', null); };
     const _qt=ov.querySelector('#evPubQrToggle'); if(_qt) _qt.onclick=function(){ const w=ov.querySelector('#evPubQrWrap'); if(w) w.style.display=''; const pd=ov.querySelector('#evPubPaid'); if(pd) pd.style.display=''; _qt.style.display='none'; }; }
   const qb=ov.querySelector('#evPubQrBox');
+  const _co=_coQr(ov, '#evPubQrBox', 'event_tickets', ticketId);
   if(qb){ if(payload && window.QRCode){ new QRCode(qb,{ text:payload, width:190, height:190, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); }
     else { qb.innerHTML='<div style="font-size:12px;color:var(--light);padding:16px;text-align:center;">'+(EN?'QR unavailable — use the details below':'QR nedostupné — použij údaje níž')+'</div>'; } }
 
   ov.querySelector('#evPubX2').onclick=function(){ _evPubClose(ov); };
   ov.querySelector('#evPubPaid').onclick=async function(){
+    if(_co && ticketId && !(await _co.flush('event_tickets', ticketId))) return;
     const b=this; b.disabled=true; b.textContent='…';
     // Celá objednávka, ne jen ten jeden řádek -- zbytek by zůstal jako rezervace a release-cron
     // by je uvolnil, přestože za ně člověk poslal peníze.
@@ -13731,6 +13785,7 @@ async function _eventQrPay(ev, tier, payee, payeeKind, _qty, _cartIn, _whoIn){
   document.body.appendChild(ov);
   try{ _payReqButton(ov.firstElementChild, (ev&&(ev.title||ev.name))||'akce', _qrAmt, cur, { event_id:(ev&&ev.id)||null }); }catch(e){}
   const box=ov.querySelector('#evqrBox');
+  const _co=_coQr(ov, '#evqrBox', 'event_tickets', ticketId);
   if(box){ if(payload && window.QRCode){ new QRCode(box,{ text:payload, width:200, height:200, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } else { box.innerHTML='<div style="font-size:12px;color:var(--light);padding:20px;">'+(EN?'QR unavailable \u2014 pay manually':'QR nedostupn\u00e9 \u2014 zaplať ru\u010dn\u011b')+'</div>'; } }
   const close=function(){ ov.remove(); };
   ov.onclick=function(e){ if(e.target===ov && !_ovHasForm(ov)) close(); };
@@ -13738,6 +13793,7 @@ async function _eventQrPay(ev, tier, payee, payeeKind, _qty, _cartIn, _whoIn){
   try{ if(_pisOn){ var _evc=ov.firstElementChild; var _evt=_evc&&_evc.firstElementChild; if(_evt) _evt.textContent='\ud83d\udcf2 '+(EN?'Pay from your bank':'Zaplatit z \u00fa\u010dtu'); } }catch(e){}
   const _evpb=ov.querySelector('#evPisBtn'); if(_evpb) _evpb.onclick=function(){ _pisPayFlow(ticketId, payee, null, _qrAmt, cur, msg, close, function(){ var _w=ov.querySelector('#evqrWrap'); if(_w) _w.style.display='block'; var _b=ov.querySelector('#evPisBtn'); if(_b) _b.style.display='none'; try{ var _c=ov.firstElementChild; var _t=_c&&_c.firstElementChild; if(_t) _t.textContent='\ud83d\udcf2 '+(EN?'Pay by bank QR':'Zapla\u0165 bankovn\u00edm QR'); }catch(e){} }, 'event'); };
   const pb=ov.querySelector('#evqrPaid'); if(pb) pb.onclick=async function(){
+    if(_co && ticketId && !(await _co.flush('event_tickets', ticketId))) return;
     pb.disabled=true; pb.textContent='\u2026';
     try{ if(ticketId){ await supaClient.from('event_tickets').update({ status:'paid_claimed', claimed_at:new Date().toISOString() }).eq('id',ticketId); } }catch(e){}
     // Párování napřed: podle něj se pořadateli říká, jestli má platbu potvrzovat.
@@ -13957,6 +14013,7 @@ async function _coach1to1QrPay(c, payee, opts){
   document.body.appendChild(ov);
   try{ _payReqButton(ov.firstElementChild, 'soukromá lekce', price, cur, {}); }catch(e){}
   const box=ov.querySelector('#c1qrBox');
+  const _co=_coQr(ov, '#c1qrBox', 'bookings', null);
   if(box){ if(payload && window.QRCode){ new QRCode(box,{ text:payload, width:200, height:200, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } else { box.innerHTML='<div style="font-size:12px;color:var(--light);padding:20px;">'+(EN?'QR unavailable \u2014 pay manually':'QR nedostupn\u00e9 \u2014 zaplať ru\u010dn\u011b')+'</div>'; } }
   const close=function(){ ov.remove(); };
   ov.onclick=function(e){ if(e.target===ov && !_ovHasForm(ov)) close(); };
@@ -14007,6 +14064,7 @@ async function _coach1to1QrPay(c, payee, opts){
     pb.disabled=true; pb.textContent='\u2026';
     // Kdo zaplatil QR kódem bez toho, aby předtím zkoušel banku, tu ještě rezervaci nemá.
     await _ensureBooking('qr');
+    if(_co && bookingId && !(await _co.flush('bookings', bookingId))){ pb.disabled=false; pb.textContent=(EN?'I\u2019ve paid':'Zaplaceno'); return; }
     const _pairP=_pairAttach(_pvs, 'bookings', bookingId);
     // Seznam k potvrzeni u kouce chce ZAROVEN payment_method='qr'. Bez nej rezervace v seznamu
     // nebyla, kouc nemel co potvrdit a student ji nevidel ani v nadchazejicich.
@@ -14323,6 +14381,7 @@ async function _cohDepositQr(cohortId, d, info, fb, pb){
   document.body.appendChild(ov);
   try{ _payReqButton(ov.firstElementChild, ((d&&d.name)?(d.name+' \u2014 '):'')+(EN?'course deposit':'z\u00e1loha kurzu'), dep, cur, { cohort_id:cohortId||null, kind:'course' }); }catch(e){}
   const box=ov.querySelector('#cdqBox');
+  const _co=_coQr(ov, '#cdqBox', 'cohort_members', memberId);
   if(box){ if(payload && window.QRCode){ new QRCode(box,{ text:payload, width:220, height:220, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } else { box.innerHTML='<div style="font-size:12px;color:var(--light);padding:20px;">'+(EN?'QR unavailable':'QR nedostupn\u00e9')+'</div>'; } }
   // Odpočet držení místa.
   { const _hEl=ov.querySelector('#cdqHold'); const _end=new Date(_resAt).getTime()+30*60000;
@@ -14331,7 +14390,7 @@ async function _cohDepositQr(cohortId, d, info, fb, pb){
       const mm=Math.floor(ms/60000), ss=Math.floor((ms%60000)/1000);
       _hEl.textContent=(EN?'Place held for ':'M\u00edsto dr\u017e\u00edme je\u0161t\u011b ')+mm+':'+String(ss).padStart(2,'0'); };
     var _ht=setInterval(_tick,1000); _tick(); }
-  const dn=ov.querySelector('#cdqDone'); if(dn) dn.onclick=async function(){ try{ localStorage.removeItem('mtl_coh_resume_'+cohortId); }catch(e){} _pairAttach(_pvs, 'cohort_members', memberId);
+  const dn=ov.querySelector('#cdqDone'); if(dn) dn.onclick=async function(){ if(_co && memberId && !(await _co.flush('cohort_members', memberId))) return; try{ localStorage.removeItem('mtl_coh_resume_'+cohortId); }catch(e){} _pairAttach(_pvs, 'cohort_members', memberId);
     dn.disabled=true;
     try{
       const r=await fetch('/api/cohort-pay',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ kind:'qr_claim', cohort_member_id:memberId, email:((info&&info.email)||'').trim() }) });
@@ -14795,10 +14854,10 @@ async function _reopenPendingQr(tbl,id){
   _payQrOverlay(payload, amount, currency, function(){
     try{ supaClient.from(tbl).update({ status:'paid_claimed', claimed_at:new Date().toISOString() }).eq('id',id).then(function(){ _renderPendingQr(); }); }catch(e){}
     return _pairAttach(_pvs, tbl, id);
-  });
+  }, { table:tbl, id:id });
 }
 
-function _payQrOverlay(payload, amount, currency, onClaim){
+function _payQrOverlay(payload, amount, currency, onClaim, src){
   const EN=LANG==='en';
   const ov=document.createElement('div');
   ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99999;display:flex;align-items:center;justify-content:center;padding:20px;';
@@ -14812,9 +14871,10 @@ function _payQrOverlay(payload, amount, currency, onClaim){
     +'</div>';
   document.body.appendChild(ov);
   const box=ov.querySelector('#_repayQrBox');
+  const _co=(src && src.table && src.id) ? _coQr(ov, '#_repayQrBox', src.table, src.id) : null;
   if(box){ if(payload && window.QRCode){ new QRCode(box,{ text:payload, width:200, height:200, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } else { box.innerHTML='<div style="font-size:12px;color:var(--light);padding:20px;">'+(EN?'QR unavailable \u2014 pay manually':'QR nedostupn\u00e9 \u2014 zaplať ru\u010dn\u011b')+'</div>'; } }
   ov.querySelector('#_repayClose').onclick=function(){ ov.remove(); };
-  ov.querySelector('#_repayPaid').onclick=function(){ let _r=null; try{ _r=onClaim&&onClaim(); }catch(e){} ov.remove();
+  ov.querySelector('#_repayPaid').onclick=async function(){ if(_co && !(await _co.flush(src.table, src.id))) return; let _r=null; try{ _r=onClaim&&onClaim(); }catch(e){} ov.remove();
     Promise.resolve(_r).then(function(st){ toast(st==='scheduled'?_pairAutoMsg(EN?'Thanks':'D\u00edky'):(EN?'Thanks \u2014 the provider will confirm it':'D\u00edky \u2014 poskytovatel to potvrd\u00ed'),1); }); };
 }
 
@@ -16096,6 +16156,14 @@ async function openGymProfile(g){
       _me ? supaClient.from('gym_memberships').select('*').eq('student_id', _me).eq('gym_id', _gid).in('status',['active','cancelling']).then(r=>r,()=>({})) : Promise.resolve({})
     ]);
     if(_pFull && _pFull.data) g = _pFull.data;
+    // POZASTAVENÝ / RUŠENÝ KLUB (sql/entity-close.sql): pro nové lidi nedostupný. Kdo tu má členství
+    // nebo docházku, profil otevře (zaplacené dojede), jen se dozví, že nic nového nekoupí.
+    if(g && (g.deleted_at || g.paused_at)){
+      const _mine=!!(_me && (String(g.owner_id)===String(_me) || (window._myGyms||[]).some(function(x){ return String(x.id)===String(_gid); })));
+      const _rel=!!((_pMemb && _pMemb.data && _pMemb.data.length) || (_pAtt && _pAtt.count));
+      if(!_mine && !_rel && !(currentUser && currentUser.role==='founder')){ toast(LANG==='en'?'\u26a0\ufe0f This club is not available in MTL right now':'\u26a0\ufe0f Tenhle klub teď v MTL není dostupný',1); return; }
+      if(!_mine) toast(g.deleted_at?(LANG==='en'?'\u2139\ufe0f This club is leaving MTL — nothing new can be bought. What you paid for stays valid.':'\u2139\ufe0f Tenhle klub odchází z MTL — nic nového tu nekoupíš. Co máš zaplacené, platí.'):(LANG==='en'?'\u2139\ufe0f This club is paused — nothing new can be bought. What you paid for stays valid.':'\u2139\ufe0f Tenhle klub je pozastavený — nic nového tu nekoupíš. Co máš zaplacené, platí.'),1);
+    }
   }
   let _pResv=null, _pDrop=null, _pGymMemb=null, _pTeam=null;
   if(_gid){
@@ -22473,8 +22541,9 @@ async function _cohRemainderSelf(memberId, d, rem, cur, pb){
   document.body.appendChild(ov);
   try{ _payReqButton(ov.firstElementChild, 'kurz — doplatek', rem, cur, { member_id:memberId||null }); }catch(e){}
   const box=ov.querySelector('#crsQrBox');
+  const _co=_coQr(ov, '#crsQrBox', 'cohort_members', memberId);
   if(box){ if(payload && window.QRCode){ new QRCode(box,{ text:payload, width:220, height:220, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } else { box.innerHTML='<div style="font-size:11px;color:var(--light);padding:20px;">'+(EN?'QR unavailable — use pay-by-bank above.':'QR nedostupné — použij platbu z účtu výše.')+'</div>'; } }
-  const dn=ov.querySelector('#crsDone'); if(dn) dn.onclick=function(){ _pairAttach(_pvs, 'cohort_members', memberId); try{ ov.remove(); }catch(e){} };
+  const dn=ov.querySelector('#crsDone'); if(dn) dn.onclick=async function(){ if(_co && memberId && !(await _co.flush('cohort_members', memberId))) return; _pairAttach(_pvs, 'cohort_members', memberId); try{ ov.remove(); }catch(e){} };
   { var _qt=ov.querySelector('#crsQrToggle'); if(_qt) _qt.onclick=function(){ var w=ov.querySelector('#crsQrWrap'); if(w){ w.style.display='block'; _qt.style.display='none'; } }; }
   const _pb=ov.querySelector('#crsPisBtn'); if(_pb) _pb.onclick=function(){ _pisPayFlow(memberId, payee, null, rem, cur, msg, function(){ try{ ov.remove(); }catch(e){} }, function(){}, 'cohort'); };
 }
@@ -22971,7 +23040,7 @@ async function openCoachMembersAtGym(gymId, gymName){
   const me=currentUser&&currentUser.id; if(!me) return;
   const EN=LANG==='en';
   let mems=[];
-  try{ const { data }=await supaClient.from('gym_memberships').select('student_id,student_name,plan_access,coach_id,status,child_name,child_age,discipline').eq('gym_id',gymId).eq('coach_id',me).in('status',['active','grace','trial','paused','past_due']); mems=data||[]; }catch(e){ console.warn('coach members', e); }
+  try{ const { data }=await supaClient.from('gym_memberships').select('student_id,student_name,plan_access,plan_classes,coach_id,status,child_name,child_age,discipline').eq('gym_id',gymId).eq('coach_id',me).in('status',['active','grace','trial','paused','past_due']); mems=data||[]; }catch(e){ console.warn('coach members', e); }
   const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99998;display:flex;align-items:flex-end;justify-content:center;';
   const rowsHtml = mems.length ? mems.map(function(m){
     const nm = m.child_name ? (m.child_name+(m.child_age?(' ('+m.child_age+')'):'')) : (m.student_name||(EN?'Member':'Člen'));
@@ -25476,6 +25545,7 @@ function _cxResultPopup(res, title, after){
   if((res.moved||[]).length) lines.push((EN?'Offered another time: ':'Nab\u00eddnut jin\u00fd term\u00edn: ')+res.moved.join(', '));
   if((res.trials||[]).length) lines.push((EN?'Free trial returned: ':'Zku\u0161ebn\u00ed vr\u00e1cen: ')+res.trials.join(', '));
   if(res.members) lines.push((EN?'Member reservations released: ':'Uvoln\u011bn\u00e9 rezervace \u010dlen\u016f: ')+res.members);
+  if(res.covered) lines.push((EN?'Members with a pass notified: ':'\u010clen\u016fm s permanentkou / \u010dlenstv\u00edm d\u00e1no v\u011bd\u011bt: ')+res.covered);
   const ps=res.passes||null;
   if(ps && (ps.offered||[]).length) lines.push((EN?'Pass holders asked to choose (move / refund): ':'Držitelé permanentek dostali na výběr (přesun / vrácení): ')+ps.offered.join(', '));
   if(ps && (ps.moved||[]).length) lines.push((EN?'Memberships moved to the new classes: ':'Členství přesunuta na nové lekce: ')+ps.moved.join(', '));
@@ -25489,11 +25559,34 @@ function _cxResultPopup(res, title, after){
 }
 // /api/class-cancel (zrušení termínu i ukončení lekce).
 async function _cxCall(body){ const tok=await _freshTok(); const r=await fetch('/api/class-cancel',{ method:'POST', headers:{'Content-Type':'application/json', Authorization:'Bearer '+(tok||'')}, body:JSON.stringify(body) }); const j=await r.json().catch(function(){ return {}; }); if(!r.ok||!j.ok) throw new Error(j.error||('HTTP '+r.status)); return j; }
+// ČLENOVÉ, NA KTERÉ SE TERMÍN VZTAHUJE, i bez rezervace (permanentka / členství pokrývá lekci) --
+// stejné pravidlo jako v docházce. Dřív okno zrušení hlásilo „Nikdo není přihlášený", i když
+// docházka ukazovala člena s permanentkou, a ten se o zrušení nedozvěděl.
+async function _cxCoveredMembers(gid, occ){
+  try{
+    const { data } = await supaClient.from('gym_memberships').select('student_id,student_name,plan_access,plan_classes,status,child_name,discipline').eq('gym_id',gid).in('status',['active','cancelling']);
+    let o=occ;
+    if((!o.level || o.disc===undefined) && o.cid && _myGymData && typeof _gymRecurring==='function'){
+      const c=(_gymRecurring(_myGymData)||[]).find(function(x){ return String(x.cid||'')===String(o.cid); });
+      if(c) o=Object.assign({}, c, occ, { level:occ.level||c.level, disc:(occ.disc!==undefined?occ.disc:c.disc) });
+    }
+    const accOf=function(m){ try{ const pa=typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access; return (pa&&pa.length)?pa:['all']; }catch(e){ return ['all']; } };
+    const seen=new Set();
+    return (data||[]).filter(function(m){
+      if(!m.student_id) return false;
+      if(!(planCovers({access:accOf(m), classes:_memClasses(m)}, o.level||'all', o) && ((o.level!=='kids') || !!m.child_name || accOf(m).indexOf('kids')>=0) && (!m.discipline || (o.disc||null)===m.discipline))) return false;
+      const k=m.student_id+'|'+(m.child_name||''); if(seen.has(k)) return false; seen.add(k); return true;
+    }).map(function(m){ return { student_id:m.student_id, child_name:m.child_name||null, name:m.child_name||m.student_name||'Člen' }; });
+  }catch(e){ return []; }
+}
 async function _openCancelOccurrence(gid, occ, mode){
   const EN=LANG==='en';
   const call=_cxCall;
   let pv; try{ pv=await call({ action:'preview', gym_id:gid, occ:{ date:occ.date, time:occ.time, name:occ.name, cid:occ.cid||null } }); }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return; }
   const bk=pv.bookings||[], mem=pv.members||[];
+  const _resvK=new Set(mem.map(function(r){ return String(r.student_id||'')+'|'+(r.child_name||''); }));
+  const cov=(await _cxCoveredMembers(gid, occ)).filter(function(c){ return !_resvK.has(c.student_id+'|'+(c.child_name||'')) && !bk.some(function(b){ return String(b.student_id||'')===String(c.student_id) && (b.child_name||'')===(c.child_name||''); }); });
+  const _pk=(_sellKind({gym:_myGymData})==='pass');
   const _dd=new Date(occ.date); const when=(_dd.getDate()+'. '+(_dd.getMonth()+1)+'.')+(occ.time?(' '+occ.time):'');
   const list=_cxRowsHtml(bk, mem, false);
   const n=bk.length+mem.length;
@@ -25503,10 +25596,13 @@ async function _openCancelOccurrence(gid, occ, mode){
     +'<div style="font-size:17px;font-weight:800;color:var(--dark);margin-bottom:4px;">\ud83d\udeab '+(mode==='forgot'?(EN?'The class did not run':'Lekce neprob\u011bhla'):(EN?'Cancel this class':'Zru\u0161it tento term\u00edn'))+'</div>'
     +'<div style="font-size:13px;color:var(--mid);margin-bottom:12px;">'+escapeHtml(occ.name||'')+' \u00b7 '+escapeHtml(when)+'</div>'
     +(n?('<div style="font-size:11.5px;font-weight:800;color:var(--light);letter-spacing:.04em;text-transform:uppercase;">'+(EN?'Booked':'P\u0159ihl\u00e1\u0161en\u00ed')+' \u00b7 '+n+'</div>'+list)
-       :('<div style="font-size:13px;color:var(--mid);background:var(--surf);border-radius:10px;padding:11px;">'+(EN?'Nobody is booked.':'Nikdo nen\u00ed p\u0159ihl\u00e1\u0161en\u00fd.')+'</div>'))
+       :(cov.length?'':('<div style="font-size:13px;color:var(--mid);background:var(--surf);border-radius:10px;padding:11px;">'+(EN?'Nobody is booked.':'Nikdo nen\u00ed p\u0159ihl\u00e1\u0161en\u00fd.')+'</div>')))
+    +(cov.length?('<div style="font-size:11.5px;font-weight:800;color:var(--light);letter-spacing:.04em;text-transform:uppercase;margin-top:'+(n?'12':'0')+'px;">'+(EN?('Members ('+(_pk?'pass':'membership')+') \u00b7 '):((_pk?'S permanentkou':'Se \u010dlenstv\u00edm')+' \u00b7 '))+cov.length+'</div>'
+        +'<div style="font-size:13px;color:var(--dark);background:var(--surf);border-radius:10px;padding:10px 11px;margin-top:6px;line-height:1.5;">'+cov.map(function(c){ return escapeHtml(c.name); }).join(', ')
+        +'<div style="font-size:12px;color:var(--mid);margin-top:4px;">'+(mode==='forgot'?(EN?'Their pass is not affected.':((_pk?'Permanentka':'\u010clenstv\u00ed')+' se jim nem\u011bn\u00ed.')):(EN?'They get a notification; their pass is not affected.':('Dostanou notifikaci, '+(_pk?'permanentka':'\u010dlenstv\u00ed')+' se jim nem\u011bn\u00ed.')))+'</div></div>'):'')
     +'<textarea id="cxNote" rows="2" maxlength="300" placeholder="'+(EN?'Reason for those booked (optional)':'D\u016fvod pro p\u0159ihl\u00e1\u0161en\u00e9 (nepovinn\u00e9)')+'" style="width:100%;box-sizing:border-box;margin-top:12px;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:inherit;font-size:14px;"></textarea>'
     +'<button id="cxGo" style="width:100%;margin-top:12px;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-weight:800;font-size:14px;cursor:pointer;font-family:\'DM Sans\';">'
-      +(n?((EN?'Cancel and notify ':'Zru\u0161it a d\u00e1t v\u011bd\u011bt ')+'('+n+')'):(EN?'Cancel the class':'Zru\u0161it term\u00edn'))+'</button>'
+      +((n+(mode==='forgot'?0:cov.length))?((EN?'Cancel and notify ':'Zru\u0161it a d\u00e1t v\u011bd\u011bt ')+'('+(n+(mode==='forgot'?0:cov.length))+')'):(EN?'Cancel the class':'Zru\u0161it term\u00edn'))+'</button>'
     +'<button id="cxNo" style="width:100%;margin-top:8px;padding:11px;background:none;border:none;color:var(--mid);font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Back':'Zp\u011bt')+'</button></div>';
   document.body.appendChild(ov);
   ov.querySelector('#cxNo').onclick=function(){ ov.remove(); };
@@ -25514,7 +25610,7 @@ async function _openCancelOccurrence(gid, occ, mode){
     const btn=this; btn.disabled=true; btn.textContent=(EN?'Cancelling\u2026':'Ru\u0161\u00edm\u2026');
     const choices={}; bk.forEach(function(x){ if(x.kind==='bank'){ const c=ov.querySelector('input[name="cxc_'+x.id+'"]:checked'); choices[x.id]=c?c.value:'move'; } });
     let res;
-    try{ res=(await call({ action:'cancel', gym_id:gid, occ:{ date:occ.date, time:occ.time, name:occ.name, cid:occ.cid||null, coach:occ.coach||null }, mode:mode, note:(ov.querySelector('#cxNote').value||'').trim(), choices:choices })).result||{}; }
+    try{ res=(await call({ action:'cancel', gym_id:gid, occ:{ date:occ.date, time:occ.time, name:occ.name, cid:occ.cid||null, coach:occ.coach||null }, mode:mode, note:(ov.querySelector('#cxNote').value||'').trim(), choices:choices, covered:(mode==='forgot'?[]:cov.map(function(c){ return { student_id:c.student_id, child_name:c.child_name }; })) })).result||{}; }
     catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); btn.disabled=false; btn.textContent=(EN?'Try again':'Zkusit znovu'); return; }
     ov.remove();
     try{ window._cancelledOcc=window._cancelledOcc||new Set(); window._cancelledOcc.add(_occO(occ)); }catch(e){}
@@ -25651,7 +25747,7 @@ async function openClassAttendance(occ){
         if(!window._attProof[k]) window._attProof[k]=t;
       });
     }catch(e){}
-  try{ const { data } = await supaClient.from('gym_memberships').select('student_id,student_name,plan_access,coach_id,status,child_name,child_age,discipline').eq('gym_id',gid).in('status',['active','cancelling']); mems=data||[]; }catch(e){}
+  try{ const { data } = await supaClient.from('gym_memberships').select('student_id,student_name,plan_access,plan_classes,coach_id,status,child_name,child_age,discipline').eq('gym_id',gid).in('status',['active','cancelling']); mems=data||[]; }catch(e){}
   try{ const { data } = await supaClient.from('gym_attendance').select('student_id,student_name,class_date,class_time,class_name,class_id,child_name').eq('gym_id',gid).eq('class_date',occ.date); att=data||[]; }catch(e){}
   // Kdo se z TÉHLE lekce omluvil. Zůstane v seznamu zešedlý -- trenér tak pozná rozdíl
   // mezi "omluvil se" a "nikdy se nepřihlásil".
@@ -25896,7 +25992,7 @@ async function loadCoachRoster(gymId, gymName){
   let rs=[], drops=[], mems=[], att=[];
   try{ const { data } = await supaClient.from('gym_class_reservations').select('*').eq('gym_id', gymId).gte('class_date', today); rs=data||[]; }catch(e){}
   try{ const { data } = await supaClient.from('gym_bookings').select('student_id,student_name,class_date,class_time,class_name,class_id,status,child_name,child_age').eq('gym_id', gymId).eq('status','active').gte('class_date', today); drops=data||[]; }catch(e){}
-  try{ const { data } = await supaClient.from('gym_memberships').select('student_id,student_name,plan_access,coach_id,status,child_name,child_age,discipline').eq('gym_id', gymId).in('status',['active','cancelling']); mems=data||[]; }catch(e){}
+  try{ const { data } = await supaClient.from('gym_memberships').select('student_id,student_name,plan_access,plan_classes,coach_id,status,child_name,child_age,discipline').eq('gym_id', gymId).in('status',['active','cancelling']); mems=data||[]; }catch(e){}
   try{ const { data } = await supaClient.from('gym_attendance').select('student_id,class_date,class_time,class_name,class_id,child_name').eq('gym_id', gymId).gte('class_date', today); att=data||[]; }catch(e){}
   // Omluvy pro VŠECHNY zobrazené dny, jedním dotazem. Dřív si je přehled bral z paměti po naposledy
   // otevřeném detailu lekce: po startu žádné, jinak jen z jednoho dne -- a přikládal je ke stejné
@@ -27364,7 +27460,7 @@ async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, onQrFa
   document.body.appendChild(ov); ov.onclick=function(e){ if(e.target===ov && !_ovHasForm(ov)){ ov.remove(); _abandon(); } };
   const bx=ov.querySelector('#pisBanks');
   // Vždy: platba z účtu jede jen přes Finbricks.
-  let _fbxOk=null;
+  let _fbxOk=null, _coPis=null;
   {
     const _url=EN?FBX_TERMS.en:FBX_TERMS.cs;
     const _cw=document.createElement('div');
@@ -27377,6 +27473,8 @@ async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, onQrFa
           +(EN?'Finbricks terms of service':'podm\u00ednkami slu\u017eby Finbricks')+'</a>'
       +'</div>';
     bx.parentNode.insertBefore(_cw, bx);
+    // NÁKUP NA FIRMU (ne u poplatku organizaci -- ten platí klub sám za sebe).
+    if(kind!=='org_fee' && String(bookingId||'').indexOf('orgfee:')!==0){ try{ _coPis=_buyerCoBar(_cw.parentNode, { collect:true, inherit:true, before:_cw }); }catch(e){ _coPis=null; } }
     _fbxOk=_cw.querySelector('#fbxTermsChk');
     _fbxOk.checked=false;
     // Banky jsou vidět hned (člověk ví, co ho čeká), ale bez souhlasu jsou ztlumené.
@@ -27402,6 +27500,8 @@ async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, onQrFa
       const _w=ov.querySelector('#fbxTermsWrap'); if(_w){ _w.style.borderColor='var(--red)'; try{ _w.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} }
       return;
     }
+    const _cbuy=_coPis?_coPis.data():null;
+    if(_cbuy && _cbuy.error){ toast('\u26a0\ufe0f '+_cbuy.error, 1); try{ _coPis.el.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} return; }
     const b=banks[+btn.dataset.i]; const _t=btn.textContent; btn.textContent='\u2026'; btn.disabled=true;
     // Souhlas jde s požadavkem na platbu a uloží ho server (/api/pis-create) -- zná plátce
     // i u hosta bez účtu. Bez něj server platbu nezaloží.
@@ -27428,7 +27528,7 @@ async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, onQrFa
     try{
       // Nejdřív jako text: když server vrátí něco jiného než JSON (chyba platformy, HTML
       // stránka, prázdno), je v hlášce vidět CO -- ne jen systémová chyba prohlížeče.
-      const _body=JSON.stringify({ bookingId:bookingId, gymName:gymNm, gymIban:iban, amount:price, test_amount:(testMode?_pisTestAmount():undefined), currency:payCur, message:(msg||'').slice(0,140), bankId:b.bankId, aspspName:b.name, aspspCountry:b.country, psuType:'personal', kind:kind, lang:(EN?'en':'cs'), fbx_terms:_fbxTerms });
+      const _body=JSON.stringify({ buyer:(_cbuy||undefined), bookingId:bookingId, gymName:gymNm, gymIban:iban, amount:price, test_amount:(testMode?_pisTestAmount():undefined), currency:payCur, message:(msg||'').slice(0,140), bankId:b.bankId, aspspName:b.name, aspspCountry:b.country, psuType:'personal', kind:kind, lang:(EN?'en':'cs'), fbx_terms:_fbxTerms });
       _step='fetch';
       // Token kvůli záznamu souhlasu: přihlášený souhlasí za sebe, host podle údajů na řádku.
       const _ph={'Content-Type':'application/json'};
@@ -27963,6 +28063,7 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom, _dpick){
   try{ _payReqButton(document.getElementById('oqrClose'), label, price, cur, { gym_id:(g&&g.id)||null, gym_name:(g&&g.name)||'', kind:kind||'dropin', occ:occ||null, plan_id:(plan&&plan.id)||null }); }catch(e){}
   try{ if(_pisOn){ var _card=ov.firstElementChild; var _tt=_card&&_card.firstElementChild; if(_tt) _tt.textContent='📲 '+(EN?'Pay from your bank':'Zaplatit z účtu'); } }catch(e){}
   const box=ov.querySelector('#oqrBox');
+  const _co=_coQr(ov, '#oqrBox', (kind==='memb'?'gym_memberships':'gym_bookings'), null);
   if(box){ if(payload && window.QRCode){ new QRCode(box,{ text:payload, width:200, height:200, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } else { box.innerHTML='<div style="font-size:12px;color:var(--mid);line-height:1.6;">'+(EN?'Pay to:':'Zaplať na:')+'<br><b>'+escapeHtml(g.receiver_id_value||'')+'</b><br>'+fmtPrice(price,cur)+' '+sym+'</div>'; } }
   const close=function(){ ov.remove(); };
   ov.onclick=function(e){ if(e.target===ov && !_ovHasForm(ov)) close(); };
@@ -28004,6 +28105,7 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom, _dpick){
   var _bx2=ov.querySelector('#oqrBox'); if(_bx2){ _bx2.style.cursor='pointer'; _bx2.ondblclick=function(){ try{ var cv=_bx2.querySelector('canvas'); var im=_bx2.querySelector('img'); var blob=null; if(cv&&cv.toDataURL){ var durl=cv.toDataURL('image/png'); var bs=atob(durl.split(',')[1]); var n=bs.length, u8=new Uint8Array(n); while(n--){ u8[n]=bs.charCodeAt(n); } blob=new Blob([u8],{type:'image/png'}); } if(!blob){ return; } var file=null; try{ file=new File([blob],'MTL-platba-QR.png',{type:'image/png'}); }catch(e){} if(file && navigator.canShare && navigator.canShare({files:[file]})){ navigator.share({files:[file], title:'MTL platba QR'}).catch(function(){}); } else { var url=URL.createObjectURL(blob); var a=document.createElement('a'); a.href=url; a.download='MTL-platba-QR.png'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(function(){ try{ URL.revokeObjectURL(url); }catch(e){} },1500); } }catch(e){} }; } if(pb) pb.onclick=async function(){
     pb.disabled=true; pb.textContent='\u2026';
     { const _iid=await _ensureIntent(); if(!_iid){ pb.disabled=false; pb.textContent='\u2713 '+(EN?'I\u2019ve paid':'Zaplaceno'); return; }
+      if(_co && !(await _co.flush(kind==='memb'?'gym_memberships':'gym_bookings', _iid))){ pb.disabled=false; pb.textContent='\u2713 '+(EN?'I\u2019ve paid':'Zaplaceno'); return; }
       _pairP=_pairAttach(_pvs, kind==='memb'?'gym_memberships':'gym_bookings', _iid); }
     try{
       if(kind!=='memb'){
@@ -28048,13 +28150,13 @@ async function _recpQrConfirm(opts){
   function row(kindLabel, who, what, amt, claimed, id, kind, recover){
     return '<div style="border:1px solid var(--border);border-radius:12px;padding:11px 12px;margin-bottom:10px;background:#fff;">'
       +'<div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;"><div style="font-weight:700;font-size:14px;min-width:0;">'+escapeHtml(who||'\u2014')+'</div><div style="font-size:13px;font-weight:800;color:#006040;white-space:nowrap;">'+fmtPrice(amt||0,cur)+' '+sym+'</div></div>'
-      +'<div style="font-size:12px;color:var(--mid);margin:1px 0 2px;">'+kindLabel+' \u00b7 '+escapeHtml(what||'')+'</div>'
+      +'<div style="font-size:12px;color:var(--mid);margin:1px 0 2px;">'+[kindLabel, escapeHtml(String(what||'').replace(/^[\s\u00b7]+/,''))].filter(Boolean).join(' \u00b7 ')+'</div>'
       +'<div style="font-size:11px;color:'+(recover?'#b45309':(claimed?'#0a8f5b':'var(--light)'))+';font-weight:700;margin-bottom:9px;">'+(recover?(EN?'\u23f0 inactive \u00b7 confirm only if the payment did arrive':'\u23f0 neaktivn\u00ed \u00b7 potvr\u010f jen pokud platba p\u0159ece p\u0159i\u0161la'):(claimed?(EN?'\u2713 says they paid':'\u2713 tvrd\u00ed, že zaplatil'):(EN?'reserved \u00b7 not yet claimed':'rezervov\u00e1no \u00b7 zat\u00edm nepotvrdil')))+'</div>'
       +'<div style="display:flex;gap:8px;"><button class="qrcOk" data-id="'+id+'" data-kind="'+kind+'" style="flex:1;padding:10px;background:#0a8f5b;color:#fff;border:none;border-radius:10px;font-size:12.5px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">\u2713 '+(kind==='memb'?(EN?'Confirm payment':'Potvrdit platbu'):(EN?'Paid':'Zaplaceno'))+'</button>'
       +'<button class="qrcNo" data-id="'+id+'" data-kind="'+kind+'" style="padding:10px 12px;background:#fff;color:var(--red);border:1px solid #f2c2c2;border-radius:10px;font-size:12.5px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">\u2717 '+(EN?'Not paid':'Nep\u0159i\u0161la')+'</button></div>'
       +'</div>';
   }
-  drops.forEach(function(b){ var _rec=(b.status==='released'||b.status==='expired'||b.status==='unpaid_void'); var _ct=b.claimed_at?(' \u00b7 '+(EN?'claimed ':'nahl\u00e1\u0161eno ')+new Date(b.claimed_at).toLocaleString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',hour:'2-digit',minute:'2-digit'})):''; h+=row((EN?'Drop-in':'Drop-in'), b.student_name, (b.class_name||'')+(b.class_time?(' \u00b7 '+b.class_time):'')+_ct, b.amount, b.status==='paid_claimed', b.id, 'dropin', _rec); });
+  drops.forEach(function(b){ var _rec=(b.status==='released'||b.status==='expired'||b.status==='unpaid_void'); var _ct=b.claimed_at?(' \u00b7 '+(EN?'claimed ':'nahl\u00e1\u0161eno ')+new Date(b.claimed_at).toLocaleString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',hour:'2-digit',minute:'2-digit'})):''; h+=row((EN?'Drop-in':'Drop-in'), b.student_name, [b.class_name||'', b.class_time?String(b.class_time).slice(0,5):''].filter(Boolean).join(' \u00b7 ')+_ct, b.amount, b.status==='paid_claimed', b.id, 'dropin', _rec); });
   membs.forEach(function(m){ var _mts=m.claimed_at||m.created_at; var _mct=_mts?(' \u00b7 '+(m.claimed_at?(EN?'claimed ':'nahl\u00e1\u0161eno '):(EN?'reserved ':'rezervov\u00e1no '))+new Date(_mts).toLocaleString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',hour:'2-digit',minute:'2-digit'})):''; h+=row(_mwG(_myGymData).One, m.student_name, (m.plan_name||'')+_mct, m.amount, true, m.id, 'memb'); });
   list.innerHTML=h;
   if($('recBackBtn')) $('recBackBtn').onclick=function(){ if(window._qrcOpts&&window._qrcOpts.back) window._qrcOpts.back(); else renderReceptionList(($('recSearch')&&$('recSearch').value)||''); };
@@ -28123,8 +28225,8 @@ async function _askAttendedAfterConfirm(b, g){
       const ov=document.createElement('div');
       ov.style.cssText='position:fixed;inset:0;z-index:100070;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:18px;';
       ov.innerHTML='<div style="background:#fff;border-radius:16px;max-width:380px;width:100%;padding:20px;font-family:\'DM Sans\';text-align:center;">'
-        +'<div style="font-size:17px;font-weight:800;color:var(--dark);margin-bottom:6px;">'+(EN?'Was they at the class?':'Byl na lekci?')+'</div>'
-        +'<div style="font-size:13.5px;color:var(--mid);line-height:1.55;margin-bottom:16px;">'+escapeHtml(who)+' \u00b7 '+escapeHtml(b.class_name||'')+'<br>'+(EN?'Yes ticks them off in attendance. No leaves them unticked.':'Ano ho rovnou za\u0161krtne v doch\u00e1zce. Ne ho nech\u00e1 nezat\u017een\u00e9ho.')+'</div>'
+        +'<div style="font-size:17px;font-weight:800;color:var(--dark);margin-bottom:6px;">'+(EN?'Were they at the class?':'Byl na lekci?')+'</div>'
+        +'<div style="font-size:13.5px;color:var(--mid);line-height:1.55;margin-bottom:16px;">'+escapeHtml(who)+(b.class_name?(' \u00b7 '+escapeHtml(b.class_name)):'')+'<br>'+(EN?'Yes ticks them off in attendance. No leaves them unticked.':'Ano ho rovnou za\u0161krtne v doch\u00e1zce. Ne ho nech\u00e1 neza\u0161krtnut\u00e9ho.')+'</div>'
         +'<div style="display:flex;gap:8px;">'
           +'<button id="_aaNo" style="flex:1;padding:12px;background:none;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'No':'Ne')+'</button>'
           +'<button id="_aaYes" style="flex:1;padding:12px;background:#006040;color:#fff;border:none;border-radius:11px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;">'+(EN?'Yes, was there':'Ano, byl')+'</button>'
@@ -31246,6 +31348,7 @@ async function _merchQrPay(orderId, payee, m, price, cur, msg){
     +'</div>';
   document.body.appendChild(ov);
   const box=ov.querySelector('#mrqrBox');
+  _coQr(ov, '#mrqrBox', 'merch_orders', orderId);
   if(box){ if(payload && window.QRCode){ new QRCode(box,{ text:payload, width:200, height:200, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } else { box.innerHTML='<div style="font-size:12px;color:var(--light);padding:20px;">'+(EN?'QR unavailable':'QR nedostupn\u00e9')+'</div>'; } }
   const close=function(){ ov.remove(); }; ov.onclick=function(e){ if(e.target===ov && !_ovHasForm(ov)) close(); };
   const cb=ov.querySelector('#mrqrClose'); if(cb) cb.onclick=close;
@@ -35027,7 +35130,8 @@ if($('btnCloseAcctMgmt')) $('btnCloseAcctMgmt').onclick=()=>closeSheet('shAccoun
   if($('btnClosePayMode')) $('btnClosePayMode').onclick=()=>closeSheet('shPayMode');
   if($('btnClosePayAccount')) $('btnClosePayAccount').onclick=()=>closeSheet('shPayAccount');
   if($('setDeactivate')) $('setDeactivate').onclick=()=>{
-    if(currentUser && currentUser.deactivated_at){ _acctSetState(null, null); return; }
+    if(currentUser && currentUser.deactivated_at){ _closeAction('unpause','account',currentUser.id,''); return; }
+    return _closeAction('pause','account',currentUser.id,'');
     if(!confirm(LANG==='en'?'Deactivate your account? You disappear from search and your invite links stop working. Nothing is deleted and you can come back anytime.':'Deaktivovat \u00fa\u010det? Zmizí\u0161 z vyhled\u00e1v\u00e1n\u00ed a tv\u00e9 zvac\u00ed odkazy p\u0159estanou fungovat. Nic se nema\u017ee a kdykoli se m\u016f\u017ee\u0161 vr\u00e1tit.')) return;
     _acctSetState(null, new Date().toISOString());
   };
@@ -35242,7 +35346,7 @@ async function loadNotifications(append){
     const isCoachRefAdmin = false; /* referral EP grants removed — rewards are Shikai/Bankai */
     // beta_pending sem musí být přidané, jinak se notifikace vykreslí jako neklikatelná a obsluha
   // se vůbec nenapojí -- větev, která má otevřít admin, pak nemá kdo spustit.
-  const clickable = k==='account_blocked' || k==='xp_adjusted' || k==='xp_restored' || k==='dsa_received' || k==='dsa_decided' || k==='dsa_report_new' || k==='dsa_restored' || k==='dsa_restricted' || k==='pass_transfer_offer' || k==='pass_transfer_done' || k==='pass_transfer_decided' || k==='pairing_link' || k==='owner_xfer_request' || k==='owner_xfer_done' || k==='sup_paidfor' || k==='owner_xfer_declined' || k==='owner_xfer_cancelled' || k==='memb_mode_needed' || k==='dac7_data_needed' || k==='dac7_overdue' || k==='admin_suspended' || k==='admin_restored' || k==='event_cohost_invite' || k==='event_cohost_accepted' || k==='event_cohost_declined' || k==='event_cohost_left' || k==='event_cohost_removed' || k==='oss_threshold' || k==='commission_upcoming' || k==='family_payreq_offer' || k==='ref_joined' || k==='coach_ref_qualified' || k==='minor_course_req' || k==='migration_request' || k==='withdrawal_done' || k==='online_withdrawal' || k==='online_plan_new' || k==='online_piece_done' || k==='online_plan_qr' || k==='online_plan_active' || k==='withdrawal_request' || k==='minor_member_app' || k==='minor_waiver' || k==='family_request' || k==='autonomy_sunset' || k==='dropin_bank_cancelled' || k==='bug_report' || k==='milestone' || k==='address_from_club' || k==='address_request' || k==='class_cancelled' || k==='trial_booked' || k==='pis_creditor_outage' || (String(k||'').indexOf('kid_share')===0) || k==='kidxfer' || k==='kidxfer_done' || k==='kidxfer_reversed' || k==='support_ticket' || k==='class_reminder' || k==='fav_added_coach' || k==='fav_added_gym' || isCoachLessonRem || isStudResched || k==='coach_pay_ok' || k==='coach_qr_intent' || k==='qr_unconfirmed' || k==='event_qr_intent' || k==='walkin_drop' || k==='org_linked' || k==='org_accepted' || k==='org_fee' || k==='org_invite' || k==='org_fee_paid' || k==='org_join' || k==='org_fee_in' || k==='org_join_req' || k==='org_removed' || k==='org_left' || k==='org_expiring' || k==='beta_pending' || k==='came_of_age' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || k==='resched_conf' || k==='cancel_conf' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked' || k==='commission_no_card' || k==='commission_suspended' || k==='new_provider' || k==='supplier_live' || k==='supplier_ended';
+  const clickable = k==='provider_closing' || k==='provider_restored' || k==='provider_closed' || k==='entity_deleted' || k==='entity_closing_admin' || k==='account_blocked' || k==='xp_adjusted' || k==='xp_restored' || k==='dsa_received' || k==='dsa_decided' || k==='dsa_report_new' || k==='dsa_restored' || k==='dsa_restricted' || k==='pass_transfer_offer' || k==='pass_transfer_done' || k==='pass_transfer_decided' || k==='pairing_link' || k==='owner_xfer_request' || k==='owner_xfer_done' || k==='sup_paidfor' || k==='owner_xfer_declined' || k==='owner_xfer_cancelled' || k==='memb_mode_needed' || k==='dac7_data_needed' || k==='dac7_overdue' || k==='admin_suspended' || k==='admin_restored' || k==='event_cohost_invite' || k==='event_cohost_accepted' || k==='event_cohost_declined' || k==='event_cohost_left' || k==='event_cohost_removed' || k==='oss_threshold' || k==='commission_upcoming' || k==='family_payreq_offer' || k==='ref_joined' || k==='coach_ref_qualified' || k==='minor_course_req' || k==='migration_request' || k==='withdrawal_done' || k==='online_withdrawal' || k==='online_plan_new' || k==='online_piece_done' || k==='online_plan_qr' || k==='online_plan_active' || k==='withdrawal_request' || k==='minor_member_app' || k==='minor_waiver' || k==='family_request' || k==='autonomy_sunset' || k==='dropin_bank_cancelled' || k==='bug_report' || k==='milestone' || k==='address_from_club' || k==='address_request' || k==='class_cancelled' || k==='trial_booked' || k==='pis_creditor_outage' || (String(k||'').indexOf('kid_share')===0) || k==='kidxfer' || k==='kidxfer_done' || k==='kidxfer_reversed' || k==='support_ticket' || k==='class_reminder' || k==='fav_added_coach' || k==='fav_added_gym' || isCoachLessonRem || isStudResched || k==='coach_pay_ok' || k==='coach_qr_intent' || k==='qr_unconfirmed' || k==='event_qr_intent' || k==='walkin_drop' || k==='org_linked' || k==='org_accepted' || k==='org_fee' || k==='org_invite' || k==='org_fee_paid' || k==='org_join' || k==='org_fee_in' || k==='org_join_req' || k==='org_removed' || k==='org_left' || k==='org_expiring' || k==='beta_pending' || k==='came_of_age' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || k==='resched_conf' || k==='cancel_conf' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked' || k==='commission_no_card' || k==='commission_suspended' || k==='new_provider' || k==='supplier_live' || k==='supplier_ended';
     // Data notifikace i pro štítky odkazu (class_cancelled, coach_qr_intent, qr_unconfirmed...).
     // Dřív tu _pd nebylo -- žilo jen v obsluze kliknutí níž -- a štítek padal na ReferenceError.
     var _pd={}; try{ _pd=JSON.parse(n.data||'{}')||{}; }catch(e){ _pd={}; }
@@ -35253,6 +35357,9 @@ async function loadNotifications(append){
       else if(k==='dac7_overdue') linkLabel = LANG==='en'?'Open the profile ›':'Otevřít profil ›';
       else if(k==='admin_suspended') linkLabel = LANG==='en'?'Details ›':'Podrobnosti ›';
       else if(k==='account_blocked') linkLabel = LANG==='en'?'Details ›':'Podrobnosti ›';
+      else if(k==='provider_closing' || k==='provider_restored' || k==='provider_closed') linkLabel = (LANG==='en'?'My bookings and memberships ›':'Moje rezervace a členství ›');
+      else if(k==='entity_deleted') linkLabel = (LANG==='en'?'Payments overview ›':'Přehled plateb ›');
+      else if(k==='entity_closing_admin') linkLabel = (LANG==='en'?'Open in Admin ›':'Otevřít v Adminu ›');
       else if(k==='xp_adjusted' || k==='xp_restored') linkLabel = (LANG==='en'?'My XP ›':'Moje XP ›');
       else if(k==='owner_xfer_request') linkLabel = LANG==='en'?'View and decide ›':'Zobrazit a rozhodnout ›';
       else if(k==='owner_xfer_declined' || k==='owner_xfer_cancelled') linkLabel = LANG==='en'?'Details ›':'Podrobnosti ›';
@@ -35331,7 +35438,7 @@ async function loadNotifications(append){
     else if(k==='milestone') linkLabel = (LANG==='en'?'Show milestones ›':'Zobrazit miln\u00edky ›');
     else if(k==='address_from_club') linkLabel = (LANG==='en'?'Check the address ›':'Zkontrolovat adresu ›');
     else if(k==='address_request') linkLabel = (_pd&&_pd.need_addr===false&&_pd.need_dob)?(LANG==='en'?'Share date of birth ›':'Zobrazit datum narozen\u00ed ›'):(LANG==='en'?'Add address ›':'Doplnit adresu ›');
-    else if(k==='class_cancelled') linkLabel = (_pd.choice==='move'?(LANG==='en'?'Pick another time ›':'Vybrat jin\u00fd term\u00edn ›'):(_pd.choice==='member'||_pd.choice==='trial')?(LANG==='en'?'Club schedule ›':'Rozvrh klubu ›'):(LANG==='en'?'My bookings ›':'Moje rezervace ›'));
+    else if(k==='class_cancelled') linkLabel = (_pd.choice==='move'?(LANG==='en'?'Pick another time ›':'Vybrat jin\u00fd term\u00edn ›'):(_pd.choice==='member'||_pd.choice==='trial'||_pd.choice==='covered')?(LANG==='en'?'Club schedule ›':'Rozvrh klubu ›'):(LANG==='en'?'My bookings ›':'Moje rezervace ›'));
     else if(k==='pis_creditor_outage') linkLabel = (LANG==='en'?'Payments to confirm ›':'\u00dahrady k potvrzen\u00ed ›');
     else if(k==='kid_share_accepted' || k==='kid_share_consent_ask') linkLabel = (LANG==='en'?'Sharing settings ›':'Nastaven\u00ed sd\u00edlen\u00ed ›');
     else if(String(k||'').indexOf('kid_share')===0 || k==='kidxfer' || k==='kidxfer_done' || k==='kidxfer_reversed') linkLabel = (LANG==='en'?'Open Family ›':'Otev\u0159\u00edt Rodinu ›');
@@ -35479,7 +35586,7 @@ async function loadNotifications(append){
         if(k==='pass_transfer_decided'){ try{ if(_pd.student_id && typeof openGymMemberDetail==='function') openGymMemberDetail(_pd.student_id, _pd.member||''); }catch(e){} return; }
         if(k==='class_cancelled'){ try{
           if(_pd.choice==='move' && _pd.booking_id){ const { data:_cb }=await supaClient.from('gym_bookings').select('*').eq('id',_pd.booking_id).maybeSingle(); if(_cb && _cb.club_cancel_choice==='move'){ openGymReschedule(_cb); return; } }
-          if((_pd.choice==='member'||_pd.choice==='trial') && _pd.gym_id){ const { data:_g }=await supaClient.from('gyms_pub').select('*').eq('id',_pd.gym_id).maybeSingle(); if(_g){ openGymProfile(_g); return; } }
+          if((_pd.choice==='member'||_pd.choice==='trial'||_pd.choice==='covered') && _pd.gym_id){ const { data:_g }=await supaClient.from('gyms_pub').select('*').eq('id',_pd.gym_id).maybeSingle(); if(_g){ openGymProfile(_g); return; } }
           openSheet('shBookings'); if(typeof loadBookings==='function') loadBookings('upcoming');
         }catch(e){} return; }
         if(k==='pis_creditor_outage'){ try{
@@ -35825,6 +35932,9 @@ async function loadNotifications(append){
         else if(k==='dac7_data_needed'){ try{ const _d=JSON.parse(n.data||'{}'); closeSheet('shNotif'); _openProviderBilling(_d.entity, _d.id, _d.missing); }catch(e){} }
         else if(k==='dac7_overdue'){ try{ const _d=JSON.parse(n.data||'{}'); closeSheet('shNotif'); _openAdminEntity(_d.entity, _d.id, _d.name); }catch(e){} }
         else if(k==='account_blocked'){ try{ const _d=JSON.parse(n.data||'{}'); closeSheet('shNotif'); _showAccountBlocked(_d); }catch(e){} }
+        else if(k==='provider_closing' || k==='provider_restored' || k==='provider_closed'){ try{ closeSheet('shNotif'); }catch(e){} try{ openSheet('shBookings'); if(typeof loadBookings==='function') loadBookings('upcoming'); }catch(e){} }
+        else if(k==='entity_deleted'){ try{ closeSheet('shNotif'); }catch(e){} try{ const _d=JSON.parse(n.data||'{}'); if(typeof _openFinance==='function') _openFinance(_d.entity_kind==='coach'?'coach':'club'); else openSheet('shDanger'); }catch(e){} }
+        else if(k==='entity_closing_admin'){ try{ closeSheet('shNotif'); }catch(e){} try{ if(typeof openAdminUsers==='function') openAdminUsers(); }catch(e){} }
         else if(k==='xp_adjusted' || k==='xp_restored'){ try{ closeSheet('shNotif'); }catch(e){} try{ if(typeof openLevel==='function') openLevel(); }catch(e){} }
         else if(k==='admin_suspended'){ try{ const _d=JSON.parse(n.data||'{}'); closeSheet('shNotif'); _showManualSuspension(_d); }catch(e){} }
         else if(k==='owner_xfer_request' || k==='owner_xfer_declined' || k==='owner_xfer_cancelled'){ try{ const _d=JSON.parse(n.data||'{}'); closeSheet('shNotif'); openXferRequest(_d.xfer_id); }catch(e){} }
@@ -36841,7 +36951,11 @@ async function _openMtlAnnounce(){
   sh.innerHTML='<div class="shdr"><div class="shdr-title" >📣 '+(LANG==='en'?'MTL announcement':'Oznámení od MTL')+'</div>'
     +'<button class="btn-close" onclick="closeSheet(\'shMtlAnnounce\')">✕</button></div>'
     +'<div style="padding:14px 16px max(40px,calc(env(safe-area-inset-bottom) + 26px));" data-noi18n>'
-      +'<div style="font-size:12px;color:var(--mid);line-height:1.55;margin-bottom:12px;">Chodí jako notifikace. Nevzniká vlákno, takže na to nikdo nemůže odpovědět.</div>'
+      +'<div style="font-size:12px;color:var(--mid);line-height:1.55;margin-bottom:12px;">Chodí vždy jako notifikace. Navíc může přijít jako zpráva (vlákno od MTL, na které nejde odpovědět — „Nelze odpovědět, v případě nutnosti napiš na Podporu“) a e-mailem.</div>'
+      +'<div class="sec-lbl">Kanály</div>'
+      +'<label style="display:flex;gap:10px;align-items:center;font-size:14px;margin-bottom:8px;cursor:pointer;"><input type="checkbox" id="maAsMsg" style="width:18px;height:18px;"> Poslat i jako zprávu</label>'
+      +'<div id="maSenderRow" style="display:none;margin:0 0 10px 28px;"><select id="maSender" style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:inherit;"><option value="support">Od: MTL Support</option><option value="founder">Od: MTL Founder</option></select></div>'
+      +'<label style="display:flex;gap:10px;align-items:center;font-size:14px;margin-bottom:12px;cursor:pointer;"><input type="checkbox" id="maAsMail" style="width:18px;height:18px;"> Poslat i e-mailem (důležité věci — změna podmínek, odstávka)</label>'
       +'<div class="sec-lbl">Komu</div>'
       +'<select id="maAud" style="width:100%;padding:12px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:inherit;margin-bottom:12px;">'
         +MTL_AUD.map(function(a){ return '<option value="'+a[0]+'">'+a[1]+'</option>'; }).join('')
@@ -36868,10 +36982,12 @@ async function _openMtlAnnounce(){
     const t=await _tok(); if(!t){ toast('⚠️ Přihlas se znovu'); return null; }
     const r=await fetch('/api/mtl-announce', {
       method:'POST', headers:{'Content-Type':'application/json', Authorization:'Bearer '+t},
-      body: JSON.stringify({ audience:aud, subject:subject, body:body, test:!!test }),
+      body: JSON.stringify({ audience:aud, subject:subject, body:body, test:!!test,
+        as_message:!!(($('maAsMsg')||{}).checked), sender:(($('maSender')||{}).value||'support'), as_email:!!(($('maAsMail')||{}).checked) }),
     });
     return await r.json();
   };
+  { const _am=$('maAsMsg'); if(_am) _am.onchange=function(){ const r=$('maSenderRow'); if(r) r.style.display=_am.checked?'block':'none'; }; }
   const _c=$('maCheck'); if(_c) _c.onclick=async function(){
     _c.disabled=true; try{
       const d=await _call(true);
@@ -36886,7 +37002,7 @@ async function _openMtlAnnounce(){
     _s.disabled=true; _s.textContent='Odesílám…';
     try{
       const d=await _call(false);
-      if(d && d.ok){ toast('✅ Odesláno: '+d.sent+(d.failed?(' · nedoručeno '+d.failed):''), 1); closeSheet('shMtlAnnounce'); }
+      if(d && d.ok){ toast('✅ Odesláno: '+d.sent+(d.failed?(' · nedoručeno '+d.failed):'')+(d.messages!=null?(' · zprávy '+d.messages):'')+(d.emails!=null?(' · e-maily '+d.emails):''), 1); closeSheet('shMtlAnnounce'); }
       else toast('⚠️ '+((d&&d.error)||''));
     } finally { _s.disabled=false; _s.textContent='Odeslat'; }
   };
@@ -41245,7 +41361,7 @@ async function openSuppliers(){
   try{ openSheet('shSuppliers'); }catch(e){}
   ov.querySelector('#_supClose').onclick=function(){ try{ closeSheet('shSuppliers'); }catch(e){ ov.remove(); } };
   const rows=(await _supRows('id,name,description,city,country,billing_country,website,contact_email,contact_phone,supplier_cats,supplier_discount,logo_url,kind,status,supplier_sub',
-    function(sel){ return supaClient.from('organizations').select(sel).eq('kind','supplier').eq('status','approved').not('supplier_sub','is',null).limit(500); })).filter(_supIsLive);
+    function(sel){ return supaClient.from('organizations').select(sel).eq('kind','supplier').eq('status','approved').is('deleted_at',null).is('paused_at',null).not('supplier_sub','is',null).limit(500); })).filter(_supIsLive);
   // Výchozí země = země prohlížejícího (klub, kouč), když v ní někdo je.
   const _myCc=String((typeof _myGymData!=='undefined' && _myGymData && (_myGymData.billing_country||_myGymData.country_code))||(currentUser&&(currentUser.billing_country||currentUser.country_code))||'').toUpperCase();
   const _myCity=String((typeof _myGymData!=='undefined' && _myGymData && _myGymData.city)||(currentUser&&currentUser.city)||'').trim().toLowerCase();
@@ -41477,7 +41593,7 @@ async function openStudentCard(){
   // SLUŽBY: jen zveřejnění dodavatelé, kteří studentům MTL dávají slevu. Výchozí země je tvoje,
   // nejbližší první -- stejné filtry i řazení jako sekce Dodavatelé.
   const rows=(await _supRows('id,name,description,city,country,billing_country,supplier_cats,supplier_discount,logo_url,kind,status,supplier_sub',
-    function(sel){ return supaClient.from('organizations').select(sel).eq('kind','supplier').eq('status','approved').not('supplier_sub','is',null).not('supplier_discount','is',null).limit(500); }))
+    function(sel){ return supaClient.from('organizations').select(sel).eq('kind','supplier').eq('status','approved').is('deleted_at',null).is('paused_at',null).not('supplier_sub','is',null).not('supplier_discount','is',null).limit(500); }))
     .filter(function(o){ return _supIsLive(o) && _supIsB2C(o) && String(o.supplier_discount||'').trim(); });
   const _myCc=String((currentUser&&(currentUser.country_code||currentUser.billing_country||currentUser.country))||'').toUpperCase();
   const _myCity=String((currentUser&&currentUser.city)||'').trim().toLowerCase();
@@ -41598,48 +41714,60 @@ function _checkoutBack(url){
   if(ps==='already'){ toast(EN?'You already have Exclusive Partner — change the tier on its card.':'Exclusive Partnera už máš — stupeň změň na jeho kartě.', 1); try{ _epReloadMe().then(function(){ openPartnerInfo(); }); }catch(e){} return; }
   location.href=url;
 }
-// NÁKUP NA FIRMU (api/doklad-buyer.js, sql/doklad-buyer.sql). Nad platbou kartou zaškrtávátko;
+// NÁKUP NA FIRMU (api/doklad-buyer.js, sql/doklad-buyer.sql). Zaškrtávátko „Nakupuji na firmu";
 // až po zaškrtnutí se objeví země, IČO (u české firmy doplní název, sídlo a DIČ z ARES), název,
-// sídlo a DIČ. Uloží se k téhle platbě a doklad od klubu / kouče pak bude na firmu (Odběratel =
-// firma, pod ní kdo objednal). Stripe se na adresu ani DIČ neptá -- jen tady a jen když jde o firmu.
-// Poslední vyplněnou firmu si prohlížeč pamatuje (jen pro pohodlí, nic se tím neodesílá).
-function _buyerCoBar(box, j){
+// sídlo a DIČ. Doklad od klubu / kouče pak bude na firmu (Odběratel = firma, pod ní kdo objednal).
+// Stripe se na adresu ani DIČ neptá -- jen tady a jen když jde o firmu.
+//   t = { sessionId, acct }  karta: uloží se k platbě Stripe hned tlačítkem,
+//   t = { table, id }        převod (QR): uloží se k objednávce; když řádek ještě nevznikl (id null),
+//                            uloží se až s ním -- volající zavolá ctrl.flush(table, id),
+//   t = { collect:true }     platba z účtu: nic se neukládá, údaje jdou s platbou (ctrl.data()).
+// Poslední vyplněnou firmu si prohlížeč pamatuje (jen pro pohodlí, nic se tím neodesílá); okno
+// výběru banky převezme firmu vyplněnou o krok dřív v okně QR.
+function _buyerCoBar(box, t){
+  t=t||{};
   const EN=LANG==='en';
-  const sid=String(j.sessionId||String(j.clientSecret||'').split('_secret_')[0]||''), acct=String(j.stripeAccount||'');
-  if(!/^cs_/.test(sid) || !acct) return;
+  const card=!!(t.sessionId||t.clientSecret), collect=!!t.collect;
+  const sid=card?String(t.sessionId||String(t.clientSecret||'').split('_secret_')[0]||''):'', acct=card?String(t.stripeAccount||t.acct||''):'';
+  if(card && (!/^cs_/.test(sid) || !acct)) return null;
+  if(!t.inherit) window._coLast=null;   // nová objednávka -- firma z minulé se nepřebírá sama
   const L=function(cs,en){ return EN?en:cs; };
   const inp='width:100%;box-sizing:border-box;padding:11px 12px;border:1px solid var(--border,#E0DDD8);border-radius:10px;font-size:15px;font-family:inherit;background:#fff;color:var(--dark,#1a1a1a);';
-  const lab='display:block;font-size:12px;font-weight:700;color:var(--mid,#555);margin:10px 0 4px;';
+  const lab='display:block;font-size:12px;font-weight:700;color:var(--mid,#555);margin:10px 0 4px;text-align:left;';
   const cc=[['CZ',L('Česko','Czechia')],['SK',L('Slovensko','Slovakia')],['PL',L('Polsko','Poland')],['DE',L('Německo','Germany')],['AT',L('Rakousko','Austria')],['HU',L('Maďarsko','Hungary')],['XX',L('Jiná země','Other country')]];
+  const hint0=collect?L('Údaje se uloží s platbou.','The details are sent with the payment.'):(card||t.id)?L('Ulož údaje dřív, než zaplatíš.','Save the details before you pay.'):L('Údaje se uloží, až potvrdíš platbu.','The details are saved when you confirm the payment.');
   const w=document.createElement('div');
-  w.style.cssText='background:#fff;border:1px solid var(--border,#E0DDD8);border-radius:14px;padding:12px 14px;margin:0 0 12px;';
+  w.style.cssText='background:#fff;border:1px solid var(--border,#E0DDD8);border-radius:14px;padding:12px 14px;margin:0 0 12px;text-align:left;';
   w.innerHTML='<label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:15px;font-weight:800;color:var(--dark,#1a1a1a);">'
-    +'<input type="checkbox" id="_coOn" style="width:20px;height:20px;accent-color:var(--red,#C8102E);margin:0;">🏢 '+L('Nakupuji na firmu','Buying for a company')+'</label>'
+    +'<input type="checkbox" class="_coOn" style="width:20px;height:20px;accent-color:var(--red,#C8102E);margin:0;">🏢 '+L('Nakupuji na firmu','Buying for a company')+'</label>'
     +'<div style="font-size:12px;color:var(--mid,#555);margin:4px 0 0 30px;line-height:1.45;">'+L('Doklad bude vystavený na firmu (IČO, DIČ, sídlo). Třeba když to platí zaměstnavatel jako benefit.','The receipt will be issued to the company (reg. no., VAT ID, address) — e.g. when your employer pays it as a benefit.')+'</div>'
-    +'<div id="_coF" style="display:none;margin-top:4px;">'
-      +'<label style="'+lab+'">'+L('Země sídla','Country')+'</label><select id="_coCc" style="'+inp+'">'+cc.map(function(c){ return '<option value="'+c[0]+'">'+c[1]+'</option>'; }).join('')+'</select>'
-      +'<div id="_coCcX" style="display:none;"><label style="'+lab+'">'+L('Kód země (2 písmena, např. FR)','Country code (2 letters, e.g. FR)')+'</label><input id="_coCc2" maxlength="2" style="'+inp+'text-transform:uppercase;"></div>'
-      +'<label style="'+lab+'" id="_coIcoL">'+L('IČO','Company reg. no.')+'</label><input id="_coIco" inputmode="numeric" maxlength="20" style="'+inp+'">'
-      +'<div id="_coAres" style="font-size:12px;color:var(--mid,#555);margin-top:4px;min-height:0;"></div>'
-      +'<label style="'+lab+'">'+L('Název firmy','Company name')+'</label><input id="_coName" maxlength="200" style="'+inp+'">'
-      +'<label style="'+lab+'">'+L('Sídlo (ulice, PSČ, město)','Registered address (street, postcode, city)')+'</label><input id="_coAddr" maxlength="300" style="'+inp+'">'
-      +'<label style="'+lab+'">'+L('DIČ (nepovinné)','VAT ID (optional)')+'</label><input id="_coDic" maxlength="20" placeholder="CZ12345678" style="'+inp+'text-transform:uppercase;">'
-      +'<div id="_coVat" style="font-size:12px;color:var(--mid,#555);margin-top:4px;"></div>'
-      +'<button id="_coSave" type="button" style="margin-top:12px;width:100%;padding:12px;border:none;border-radius:11px;background:var(--dark,#1a1a1a);color:#fff;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;">'+L('Uložit údaje firmy','Save company details')+'</button>'
-      +'<div id="_coMsg" style="font-size:12.5px;margin-top:8px;line-height:1.45;color:var(--mid,#555);">'+L('Ulož údaje dřív, než zaplatíš.','Save the details before you pay.')+'</div>'
+    +'<div class="_coF" style="display:none;margin-top:4px;">'
+      +'<label style="'+lab+'">'+L('Země sídla','Country')+'</label><select class="_coCc" style="'+inp+'">'+cc.map(function(c){ return '<option value="'+c[0]+'">'+c[1]+'</option>'; }).join('')+'</select>'
+      +'<div class="_coCcX" style="display:none;"><label style="'+lab+'">'+L('Kód země (2 písmena, např. FR)','Country code (2 letters, e.g. FR)')+'</label><input class="_coCc2" maxlength="2" style="'+inp+'text-transform:uppercase;"></div>'
+      +'<label style="'+lab+'" class="_coIcoL">'+L('IČO','Company reg. no.')+'</label><input class="_coIco" inputmode="numeric" maxlength="20" style="'+inp+'">'
+      +'<div class="_coAres" style="font-size:12px;color:var(--mid,#555);margin-top:4px;text-align:left;"></div>'
+      +'<label style="'+lab+'">'+L('Název firmy','Company name')+'</label><input class="_coName" maxlength="200" style="'+inp+'">'
+      +'<label style="'+lab+'">'+L('Sídlo (ulice, PSČ, město)','Registered address (street, postcode, city)')+'</label><input class="_coAddr" maxlength="300" style="'+inp+'">'
+      +'<label style="'+lab+'">'+L('DIČ (nepovinné)','VAT ID (optional)')+'</label><input class="_coDic" maxlength="20" placeholder="CZ12345678" style="'+inp+'text-transform:uppercase;">'
+      +'<div class="_coVat" style="font-size:12px;color:var(--mid,#555);margin-top:4px;text-align:left;"></div>'
+      +((card||(t.table&&t.id))?('<button class="_coSave" type="button" style="margin-top:12px;width:100%;padding:12px;border:none;border-radius:11px;background:var(--dark,#1a1a1a);color:#fff;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;">'+L('Uložit údaje firmy','Save company details')+'</button>'):'')
+      +'<div class="_coMsg" style="font-size:12.5px;margin-top:8px;line-height:1.45;color:var(--mid,#555);text-align:left;">'+hint0+'</div>'
     +'</div>';
-  box.appendChild(w);
-  const $=function(id){ return w.querySelector('#'+id); };
+  if(t.before && t.before.parentNode===box) box.insertBefore(w, t.before); else box.appendChild(w);
+  const $=function(c){ return w.querySelector('.'+c); };
   let saved=false, auto={};
   const country=function(){ const v=$('_coCc').value; return v==='XX' ? String($('_coCc2').value||'').trim().toUpperCase() : v; };
-  const msg=function(t, ok){ const m=$('_coMsg'); m.textContent=t; m.style.color=ok?'#006040':(ok===false?'#B00020':'var(--mid,#555)'); m.style.fontWeight=ok?'700':'400'; };
-  const dirty=function(){ if(saved){ saved=false; msg(L('Změněno — ulož znovu, než zaplatíš.','Changed — save again before you pay.')); } };
+  const msg=function(tx, ok){ const m=$('_coMsg'); m.textContent=tx; m.style.color=ok?'#006040':(ok===false?'#B00020':'var(--mid,#555)'); m.style.fontWeight=ok?'700':'400'; };
+  const dirty=function(){ if(saved){ saved=false; msg(L('Změněno — ulož znovu, než zaplatíš.','Changed — save again before you pay.')); } setTimeout(function(){ try{ const b=data(); if(b && !b.error) window._coLast=b; }catch(e){} }, 0); };
   const post=async function(body){
-    const r=await fetch('/api/doklad-buyer',{ method:'POST', headers:Object.assign({ 'Content-Type':'application/json' }, (typeof _authHdr==='function' ? (await _authHdr().catch(function(){ return {}; })) : {})), body:JSON.stringify(Object.assign({ sessionId:sid, acct:acct }, body)) });
+    let hd={ 'Content-Type':'application/json' };
+    try{ if(typeof currentUser!=='undefined' && currentUser && typeof _authHdr==='function') hd=Object.assign(hd, await _authHdr()); }catch(e){}
+    const r=await fetch('/api/doklad-buyer',{ method:'POST', headers:hd, body:JSON.stringify(body) });
     let k={}; try{ k=await r.json(); }catch(e){}
     if(!r.ok) throw new Error(k.error||('HTTP '+r.status));
     return k;
   };
+  const target=function(tbl, id){ return card ? { sessionId:sid, acct:acct } : { table:tbl||t.table, id:String(id||t.id||'') }; };
   const syncCc=function(){
     const cz=$('_coCc').value==='CZ';
     $('_coCcX').style.display=$('_coCc').value==='XX'?'block':'none';
@@ -41647,7 +41775,7 @@ function _buyerCoBar(box, j){
     $('_coIco').setAttribute('inputmode', cz?'numeric':'text');
     $('_coAres').textContent='';
   };
-  const fill=function(id, v){ const el=$(id); if(!v) return; if(!el.value.trim() || auto[id]===el.value){ el.value=v; auto[id]=v; } };
+  const fill=function(c, v){ const el=$(c); if(!v) return; if(!el.value.trim() || auto[c]===el.value){ el.value=v; auto[c]=v; } };
   let aresSeq=0;
   const ares=async function(){
     if($('_coCc').value!=='CZ') return;
@@ -41671,39 +41799,74 @@ function _buyerCoBar(box, j){
       else if(k && k.ok) $('_coVat').innerHTML='<span style="color:#B26A00;">'+escapeHtml(L('DIČ ve VIES nenalezeno — na doklad se uvede, jak je napsané.','VAT ID not found in VIES — it will appear on the receipt as typed.'))+'</span>';
     }catch(e){}
   };
-  const save=async function(){
+  // Údaje z formuláře: null = nezaškrtnuto, { error } = chybí něco povinného, jinak data.
+  const data=function(){
+    if(!$('_coOn').checked) return null;
     const b={ company:$('_coName').value.trim(), address:$('_coAddr').value.trim(), ico:$('_coIco').value.trim(), dic:$('_coDic').value.trim(), country:country() };
-    if(!/^[A-Z]{2}$/.test(b.country)){ msg(L('Vyplň kód země (2 písmena).','Fill in the country code (2 letters).'), false); return; }
-    if(b.country==='CZ' && !/^\d{8}$/.test(b.ico.replace(/\s+/g,''))){ msg(L('Vyplň IČO (8 číslic).','Fill in the reg. no. (8 digits).'), false); return; }
-    if(!b.company){ msg(L('Vyplň název firmy.','Fill in the company name.'), false); return; }
-    if(!b.address){ msg(L('Vyplň sídlo firmy.','Fill in the registered address.'), false); return; }
-    const btn=$('_coSave'); btn.disabled=true; btn.textContent='…';
-    try{
-      await post(b); saved=true;
-      msg('✔ '+L('Uloženo — doklad bude na firmu „'+b.company+'“.','Saved — the receipt will be issued to “'+b.company+'”.'), true);
-      try{ localStorage.setItem('mtl_buyer_co', JSON.stringify(b)); }catch(e){}
-    }catch(e){ msg('⚠️ '+L('Neuložilo se: ','Not saved: ')+((e&&e.message)||''), false); }
-    btn.disabled=false; btn.textContent=L('Uložit údaje firmy','Save company details');
+    if(!/^[A-Z]{2}$/.test(b.country)) return { error:L('Vyplň kód země (2 písmena).','Fill in the country code (2 letters).') };
+    if(b.country==='CZ' && !/^\d{8}$/.test(b.ico.replace(/\s+/g,''))) return { error:L('Vyplň IČO (8 číslic).','Fill in the reg. no. (8 digits).') };
+    if(!b.company) return { error:L('Vyplň název firmy.','Fill in the company name.') };
+    if(!b.address) return { error:L('Vyplň sídlo firmy.','Fill in the registered address.') };
+    return b;
+  };
+  const remember=function(b){ window._coLast=b; try{ localStorage.setItem('mtl_buyer_co', JSON.stringify(b)); }catch(e){} };
+  const okMsg=function(b){ msg('✔ '+L('Uloženo — doklad bude na firmu „'+b.company+'“.','Saved — the receipt will be issued to “'+b.company+'”.'), true); };
+  const save=async function(tbl, id){
+    const b=data(); if(!b) return true;
+    if(b.error){ msg(b.error, false); return false; }
+    const btn=$('_coSave'); if(btn){ btn.disabled=true; btn.textContent='…'; }
+    let ok=false;
+    try{ await post(Object.assign(target(tbl, id), b)); saved=true; ok=true; okMsg(b); remember(b); }
+    catch(e){ msg('⚠️ '+L('Neuložilo se: ','Not saved: ')+((e&&e.message)||''), false); }
+    if(btn){ btn.disabled=false; btn.textContent=L('Uložit údaje firmy','Save company details'); }
+    return ok;
+  };
+  const prefill=function(p, note){
+    if(!p || $('_coName').value) return;
+    const known=cc.some(function(c){ return c[0]===p.country; });
+    $('_coCc').value=known?p.country:'XX'; if(!known) $('_coCc2').value=p.country||''; syncCc();
+    $('_coIco').value=p.ico||''; $('_coName').value=p.company||''; $('_coAddr').value=p.address||''; $('_coDic').value=p.dic||'';
+    if(note) msg(note);
   };
   $('_coOn').onchange=async function(){
     $('_coF').style.display=this.checked?'block':'none';
     if(this.checked){
-      try{ const p=JSON.parse(localStorage.getItem('mtl_buyer_co')||'null'); if(p && !$('_coName').value){
-        const known=cc.some(function(c){ return c[0]===p.country; });
-        $('_coCc').value=known?p.country:'XX'; if(!known) $('_coCc2').value=p.country||''; syncCc();
-        $('_coIco').value=p.ico||''; $('_coName').value=p.company||''; $('_coAddr').value=p.address||''; $('_coDic').value=p.dic||'';
-        msg(L('Vyplněno podle minula — zkontroluj a ulož.','Filled in from last time — check and save.'));
-      } }catch(e){}
-    } else if(saved){
+      let p=null; try{ p=JSON.parse(localStorage.getItem('mtl_buyer_co')||'null'); }catch(e){}
+      prefill(window._coLast||p, L('Vyplněno podle minula — zkontroluj','Filled in from last time — check it')+((card||t.id)?L(' a ulož.',' and save.'):'.'));
+    } else {
+      window._coLast=null;
+      if(!(saved && !collect)) return;
       saved=false;
-      try{ await post({ clear:true }); msg(L('Ulož údaje dřív, než zaplatíš.','Save the details before you pay.')); toast(L('Doklad bude na tvé jméno.','The receipt will be in your name.')); }catch(e){}
+      try{ await post(Object.assign(target(), { clear:true })); msg(hint0); toast(L('Doklad bude na tvé jméno.','The receipt will be in your name.')); }catch(e){}
     }
   };
   $('_coCc').onchange=function(){ syncCc(); dirty(); ares(); };
   $('_coIco').oninput=function(){ dirty(); if(/^\d{8}$/.test(String(this.value||'').replace(/\s+/g,''))) ares(); };
-  ['_coName','_coAddr','_coCc2'].forEach(function(id){ $(id).oninput=dirty; });
+  ['_coName','_coAddr','_coCc2'].forEach(function(c){ $(c).oninput=dirty; });
   $('_coDic').oninput=dirty; $('_coDic').onchange=vies;
-  $('_coSave').onclick=save;
+  if($('_coSave')) $('_coSave').onclick=function(){ save(); };
+  // Okno výběru banky po okně QR: firma, kterou člověk právě vyplnil, se převezme a zaškrtne.
+  if(t.inherit && window._coLast){ $('_coOn').checked=true; $('_coF').style.display='block'; prefill(window._coLast, L('Převzato z předchozího kroku — zkontroluj.','Taken from the previous step — check it.')); }
+  const ctrl={
+    el:w,
+    data:function(){ const b=data(); if(b && !b.error) remember(b); return b; },
+    // Řádek objednávky právě vznikl (nebo se platba potvrzuje): uložit, pokud je zaškrtnuto.
+    // Vrací false, když je zaškrtnuto a něco chybí -- volající platbu nepotvrdí.
+    flush:async function(tbl, id){ const b=data(); if(!b) return true; if(b.error){ msg(b.error, false); toast('⚠️ '+b.error, 1); try{ w.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} return false; }
+      if(saved && !tbl) return true; if(!id && !t.id) return true; return save(tbl, id); },
+  };
+  return ctrl;
+}
+// NÁKUP NA FIRMU v okně QR platby: lišta nad QR kódem (nad blokem, ve kterém QR leží).
+function _coQr(ov, qrSel, table, id){
+  try{
+    const card=ov && ov.firstElementChild, qb=ov && ov.querySelector(qrSel);
+    if(!card || !qb) return null;
+    let anchor=qb; while(anchor && anchor.parentNode!==card) anchor=anchor.parentNode;
+    // Rozbalená lišta okno prodlouží -- na mobilu se musí dát doscrollovat k QR a tlačítkům.
+    if(!card.style.maxHeight){ card.style.maxHeight='90vh'; card.style.overflowY='auto'; card.style.webkitOverflowScrolling='touch'; }
+    return _buyerCoBar(card, { table:table, id:id||null, before:anchor||null });
+  }catch(e){ return null; }
 }
 // src = adresa /api/pay?… (GET, doplní se embed=1), nebo funkce (embed) -> JSON odpovědi serveru
 // (POST /api/cohort-pay); odpověď, kterou si funkce obslouží sama (např. „už zapsán“), vrátí
@@ -44964,6 +45127,19 @@ async function openChat(conv){
           }
         };
       } else { _cbb.style.display='none'; }
+    }
+  }catch(e){}
+  // OZNÁMENÍ OD MTL (MTL Support / MTL Founder, api/mtl-announce.js): vlákno jen ke čtení.
+  // Odpovídá se jen přes Podporu; databáze odpověď do takového vlákna stejně nepustí.
+  try{
+    if(conv.no_reply && !amICoach){
+      if($('chatInputRow')) $('chatInputRow').style.display='none';
+      if($('chatBlockBtn')) $('chatBlockBtn').style.display='none';
+      const _bb=$('chatBlockedBanner');
+      if(_bb){ _bb.style.display='block';
+        _bb.innerHTML='<div style="text-align:center;padding:4px 0;font-size:13px;color:var(--mid);line-height:1.5;">'+(LANG==='en'?'You cannot reply here — if needed, write to ':'Nelze odpovědět — v případě nutnosti napiš na ')
+          +'<a href="#" id="chatNoReplySup" style="color:var(--blue);font-weight:800;">'+(LANG==='en'?'Support':'Podporu')+'</a>.</div>';
+        const _ns=$('chatNoReplySup'); if(_ns) _ns.onclick=function(ev){ ev.preventDefault(); try{ closeSheet('shChat'); }catch(e){} try{ openSupport(); }catch(e){} }; }
     }
   }catch(e){}
 
@@ -51630,7 +51806,9 @@ async function _finishReg(){ if(!_suUserId){ toast(LANG==='en'?'⚠️ Session e
             body: JSON.stringify({ user_id:_suUserId }) }); }catch(e){}
     }
   }catch(e){ console.log('[betaNotify]', e&&e.message); }
-  toast(L('Účet vytvořen!'),1); currentUser={ id:_suUserId, email:_suEmail, name:nm, role:'student', coach_status:null, beta_status:(await _testModeNow()?'pending':null) }; try{ if(typeof _recordConsent==='function'){ if(!(await _testModeNow())) _recordConsent('terms', LEGAL_VERSION, LANG, (typeof legalTerms==='function'?legalTerms():''), {via:'signup'}); if(!(await _testModeNow())) _recordConsent('privacy', LEGAL_VERSION, LANG, (typeof legalPrivacy==='function'?legalPrivacy():''), {via:'signup'});
+  toast(L('Účet vytvořen!'),1); currentUser={ id:_suUserId, email:_suEmail, name:nm, role:'student', coach_status:null, beta_status:(await _testModeNow()?'pending':null) }; // UVÍTACÍ E-MAIL s PDF odsouhlasených podmínek (api/welcome-mail.js): až se zapíšou souhlasy níž.
+  try{ setTimeout(async function(){ try{ const _h=await _authHdr(); if(_h && _h.Authorization) fetch('/api/welcome-mail',{ method:'POST', headers:Object.assign({'Content-Type':'application/json'}, _h), body:'{}' }).catch(function(){}); }catch(e){} }, 4000); }catch(e){}
+  try{ if(typeof _recordConsent==='function'){ if(!(await _testModeNow())) _recordConsent('terms', LEGAL_VERSION, LANG, (typeof legalTerms==='function'?legalTerms():''), {via:'signup'}); if(!(await _testModeNow())) _recordConsent('privacy', LEGAL_VERSION, LANG, (typeof legalPrivacy==='function'?legalPrivacy():''), {via:'signup'});
       try{ if(await _testModeNow()){
         _recordConsent('beta_terms', BETA_NDA_VERSION, LANG, (typeof legalBeta==='function'?legalBeta():''), {via:'signup'});
         _recordConsent('beta_privacy', BETA_NDA_VERSION, LANG, (typeof legalBetaPrivacy==='function'?legalBetaPrivacy():''), {via:'signup'});
@@ -52599,6 +52777,7 @@ function enterApp(){
   }catch(e){}
   try{ _flushOwnOrigins().then(function(){ return _loadMemberOrigin(); }); }catch(e){}
   try{ renderAcctStateBar(); }catch(e){}
+  try{ setTimeout(function(){ _closeRefresh(); }, 900); }catch(e){}
   try{ _loadMyClubs(); }catch(e){}
   try{ _restoreSignupCountry(); }catch(e){}
   // Refresh the Stripe payment flag once per session: it is otherwise only ever set by a one-off
@@ -54458,7 +54637,8 @@ async function checkAuth(){
   if(data.session){
     const { data: prof } = await supaClient.from('profiles_me').select('*').eq('id', data.session.user.id).single();
     if(prof && prof.purged_at){ try{ await supaClient.auth.signOut(); }catch(e){} return; }
-    if(prof && prof.deleted_at){ openRestorePrompt(prof); return; }
+    // Účet v lhůtě výmazu se normálně přihlásí: proužek nahoře ukazuje datum a Obnovit. Dojet
+    // zaplacené rezervace (odučit, odbavit) musí jít i během těch 30 dnů.
     if(_regIncomplete(prof)){
       // Profil se ZÁMĚRNĚ nedopisuje. Dřív se tu zakládal útržek bez jména, data narození
       // a souhlasů, čímž se nedokončená registrace prohlásila za hotovou a chybějící údaje
@@ -54962,6 +55142,23 @@ function renderAcctStateBar(){
     const b=$('acctReactivate'); if(b) b.onclick=function(){ _acctSetState(null,null); };
     return;
   }
+  // PROFIL SE RUŠÍ NEBO JE POZASTAVENÝ (klub, kouč, organizace): proužek s datem a jedním klikem zpět.
+  { const _ce=((window._closeState&&window._closeState.entities)||[]).filter(function(e){ return e.closingAt||e.pausedAt; });
+    if(_ce.length && !currentUser.deleted_at){   /* maže se celý účet -> proužek účtu (níž) má přednost */
+      const e=_ce.find(function(x){ return x.closingAt; })||_ce[0], what=_closeWhat(e.kind, e.name, EN);
+      bar.style.display='block';
+      if(e.closingAt){ bar.style.background='#FEECEC'; bar.style.color='#8B1E1E';
+        bar.innerHTML='\ud83d\uddd1\ufe0f '+escapeHtml(what)+(EN?(' will be deleted completely on '+_closeDate(e.deleteOn)+' and is hidden from everyone already.'):(' se kompletně vymaže '+_closeDate(e.deleteOn)+' a už teď je skrytý všem.'));
+      } else { bar.style.background='#EEF4FF'; bar.style.color='#1B3A63';
+        bar.innerHTML='\u23f8\ufe0f '+escapeHtml(what)+(EN?' is paused — hidden, nothing new is sold.':' je pozastavený — skrytý, nic nového se neprodá.'); }
+      bar.innerHTML+=' <button id="acctEntAct" style="background:none;border:none;color:inherit;font-weight:800;font-size:12.5px;text-decoration:underline;cursor:pointer;font-family:\'DM Sans\';padding:0 0 0 4px;">'
+        +(e.closingAt?(EN?'Restore':'Obnovit'):(EN?'Resume':'Zrušit pozastavení'))+'</button>'
+        +(_ce.length>1?(' <button id="acctEntMore" style="background:none;border:none;color:inherit;font-weight:700;font-size:12.5px;text-decoration:underline;cursor:pointer;font-family:\'DM Sans\';padding:0 0 0 4px;">+'+(_ce.length-1)+'</button>'):'');
+      _acctBarOffset(true);
+      const b=$('acctEntAct'); if(b) b.onclick=function(){ _closeAction(e.closingAt?'restore':'unpause', e.kind, e.id, e.name); };
+      const m=$('acctEntMore'); if(m) m.onclick=function(){ openSheet('shDanger'); };
+      return;
+    } }
   const _cnr = (function(){
     try{
       if(!currentUser || currentUser.coach_status!=='approved') return null;
@@ -54984,28 +55181,26 @@ function renderAcctStateBar(){
     return;
   }
   if(currentUser.deleted_at){
-    const left = Math.max(0, 30 - Math.floor((Date.now() - new Date(currentUser.deleted_at).getTime())/86400000));
+    const _dOn=_closeDate(new Date(new Date(currentUser.deleted_at).getTime()+30*86400000).toISOString());
     bar.style.display='block'; bar.style.background='#FEECEC'; bar.style.color='#8B1E1E';
-    bar.innerHTML = (EN?('You asked to delete your account \u2014 it goes in '+left+' day'+(left===1?'':'s')+'.')
-                       :('Zadal jsi \u00fa\u010det k vymaz\u00e1n\u00ed \u2014 sma\u017ee se za '+left+' dn\u00ed.'))
+    bar.innerHTML = '\ud83d\uddd1\ufe0f '+(EN?('Your whole account will be deleted completely on '+_dOn+' and is hidden from everyone already.')
+                       :('Celý účet se kompletně vymaže '+_dOn+' a už teď je skrytý všem.'))
       + ' <button id="acctRestore" style="background:none;border:none;color:#8B1E1E;font-weight:800;font-size:12.5px;text-decoration:underline;cursor:pointer;font-family:\'DM Sans\';padding:0 0 0 4px;">'
       + (EN?'Restore account':'Obnovit \u00fa\u010det') + '</button>';
     _acctBarOffset(true);
-    const b=$('acctRestore'); if(b) b.onclick=function(){ _acctSetState(null,null); };
+    const b=$('acctRestore'); if(b) b.onclick=function(){ _closeAction('restore','account',currentUser.id,''); };
     return;
   }
   bar.style.display='none';
   _acctBarOffset(false);
 }
+// Stav účtu mění server (api/entity-close.js): pozastavení účtu pozastaví i jeho profily, obnova
+// vrátí předplatná. deleted = null -> zrušit výmaz; deactivated -> pozastavit / zrušit pozastavení.
 async function _acctSetState(deleted, deactivated){
-  const EN = LANG === 'en';
   try{
-    const patch = { deleted_at: deleted, deactivated_at: deactivated };
-    const { error } = await supaClient.from('profiles').update(patch).eq('id', currentUser.id);
-    if(error) throw error;
-    currentUser.deleted_at = deleted; currentUser.deactivated_at = deactivated;
-    renderAcctStateBar();
-    if(!deleted && !deactivated) toast(EN?'\u2705 Account restored':'\u2705 \u00da\u010det obnoven');
+    if(currentUser && currentUser.deleted_at && !deleted) return _closeAction('restore', 'account', currentUser.id, '');
+    if(deactivated) return _closeAction('pause', 'account', currentUser.id, '');
+    return _closeAction('unpause', 'account', currentUser.id, '');
   }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
 }
 // Founder switch. Circle and the leaderboards are built but not finished -- Circle in particular
@@ -55118,21 +55313,195 @@ async function _featToggle(key, on){
     try{ renderFeatureToggles(); }catch(e){}
   }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
 }
-function openDeleteFlow(kind, gymId, gymName){
-  const titles={ account:(LANG==='en'?'Delete your account':'Zrušit celý účet'), coach:(LANG==='en'?'Delete coach profile':'Smazat profil kouče'), gym:(LANG==='en'?'Delete club profile':'Smazat profil klubu') };
-  const what = kind==='account'?(LANG==='en'?'your whole account':'celý tvůj účet') : kind==='coach'?(LANG==='en'?'your coach profile':'tvůj profil kouče') : (gymName||'gym');
-  const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99999;display:flex;align-items:flex-end;justify-content:center;';
-  ov.innerHTML=`<div style="background:#fff;width:100%;max-width:480px;border-radius:18px;padding:22px;max-height:86vh;overflow-y:auto;"><div style="font-size:18px;font-weight:800;color:var(--red);margin-bottom:10px;">\u26A0\uFE0F ${titles[kind]}</div><div style="font-size:14px;line-height:1.6;color:var(--dark);margin-bottom:14px;">${LANG==='en'?`This hides ${what} from everywhere immediately. You have <b>30 days</b> to change your mind \u2014 just log back in and restore it. After 30 days it can no longer be restored: the profile, photos and contact details are permanently erased and sign-in is removed. Receipts, attendance and payment history stay with the club and the coach \u2014 they have to keep them for accounting and for any dispute.`:`Tímto se ${what} okamžitě skryje odevšud. Máš <b>30 dní</b> na rozmyšlenou \u2014 stačí se znovu přihlásit a obnovit. Po 30 dnech už obnovit nejde: profil, fotky a kontaktní údaje se nevratně vymažou a přihlášení se zruší. Doklady, docházka a historie plateb zůstávají u klubu a kouče \u2014 musí je držet kvůli účetnictví a případným sporům.`}</div><div style="font-size:13px;font-weight:700;color:var(--mid);margin-bottom:6px;">${LANG==='en'?'Why are you leaving? (optional)':'Proč odcházíš? (nepovinné)'}</div><textarea id="delReason" rows="3" style="width:100%;box-sizing:border-box;padding:11px;border:1px solid var(--border);border-radius:10px;font-family:'DM Sans';font-size:14px;resize:none;margin-bottom:14px;"></textarea>${kind==='account'?`<button id="delDeact" style="width:100%;padding:13px;background:#EEF4FF;color:#1B3A63;border:1px solid #CFE0FF;border-radius:12px;font-weight:800;cursor:pointer;font-family:'DM Sans';margin-bottom:10px;text-align:left;">${LANG==='en'?'Deactivate instead':'Rad\u011bji jen deaktivovat'}<br><span style="font-weight:600;font-size:11.5px;color:var(--mid);">${LANG==='en'?'You disappear from everywhere. Nothing is deleted \u2014 including your children. Back anytime, with no time limit. Unlike deleting, this is fully reversible.':'Zmiz\u00ed\u0161 odev\u0161ad. Nic se nema\u017ee \u2014 v\u010detn\u011b d\u011bt\u00ed. Kdykoli zp\u011bt, bez \u010dasov\u00e9ho limitu. Na rozd\u00edl od smaz\u00e1n\u00ed je to pln\u011b vratn\u00e9.'}</span></button>`:''}<div style="display:flex;gap:8px;"><button id="delCancel" style="flex:1;padding:13px;background:var(--surf);border:1px solid var(--border);border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';color:var(--dark);">${LANG==='en'?'Keep it':'Nechat'}</button><button id="delGo" style="flex:1;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-weight:800;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Delete':'Smazat'}</button></div></div>`;
-  document.body.appendChild(ov); const close=()=>ov.remove(); ov.onclick=(e)=>{ if(e.target===ov && !_ovHasForm(ov)) close(); }; ov.querySelector('#delCancel').onclick=close;
-  { const _dd=ov.querySelector('#delDeact'); if(_dd) _dd.onclick=async function(){ await _acctSetState(null, new Date().toISOString()); close(); }; }
-  ov.querySelector('#delGo').onclick=async()=>{ const reason=(ov.querySelector('#delReason').value||'').trim()||null; const btn=ov.querySelector('#delGo'); btn.disabled=true; btn.textContent=L('Mažu...');
+// ── POZASTAVENÍ A VÝMAZ ÚČTU / PROFILU (api/entity-close.js, sql/entity-close.sql) ───────────
+// Každý profil zvlášť (kouč, každý klub, organizace / dodavatel) i celý účet:
+//   ⏸️ Pozastavit -- skrytý, nic nového se neprodá, vše ostatní běží; zrušit jedním klikem.
+//   🗑️ Smazat     -- totéž hned + za 30 dní výmaz; do té doby jde obnovit. Co je zaplacené až po
+//                   datu výmazu, poskytovatel vrátí (100 % nevyčerpané části) nebo splní mimo
+//                   aplikaci. Historie (doklady, souhlasy, docházka a XP, achievementy) zůstává.
+// Stav drží server; appka ho jen čte (window._closeState) a ukazuje v proužku nahoře.
+const _CLOSE_REASONS=[['temporary','Jen na čas (sezóna, zranění, dovolená)','Only for a while (season, injury, holiday)'],['expensive','Je to drahé','It is too expensive'],
+  ['no_students','Přes MTL mi nechodí lidi','MTL does not bring me people'],['complicated','Je to složité','It is too complicated'],
+  ['other_tool','Používám jiný systém','I use another system'],['stopping','Končím s činností','I am stopping altogether'],['other','Jiný důvod','Other reason']];
+async function _closeApi(body){
+  const hd=Object.assign({ 'Content-Type':'application/json' }, await _authHdr());
+  const r=await fetch('/api/entity-close',{ method:'POST', headers:hd, body:JSON.stringify(body) });
+  const j=await r.json().catch(function(){ return {}; });
+  if(!r.ok) { const e=new Error(j.error||('HTTP '+r.status)); e.data=j; throw e; }
+  return j;
+}
+async function _closeRefresh(){
+  try{ if(!currentUser) return; window._closeState=await _closeApi({ action:'state' }); }catch(e){ return; }
+  try{ renderAcctStateBar(); }catch(e){}
+  try{ if($('shDanger') && $('shDanger').classList.contains('open')) _renderDangerList(); }catch(e){}
+  try{ ['shGymManage','shCoachSettings','shOrgApply'].forEach(function(id){ if($(id) && $(id).classList.contains('open')) _closeInject(id); }); }catch(e){}
+}
+function _closeDate(iso){ try{ const d=new Date(iso); return d.toLocaleDateString(LANG==='en'?'en-GB':'cs-CZ',{ day:'numeric', month:'numeric', year:'numeric', timeZone:'Europe/Prague' }); }catch(e){ return ''; } }
+function _closeWhat(kind, name, EN){
+  if(kind==='account') return EN?'Your whole account':'Celý účet';
+  if(kind==='coach') return EN?'Your coach profile':'Profil kouče';
+  if(kind==='gym') return (EN?'Club ':'Klub ')+'„'+(name||'')+'“';
+  return (EN?'Profile ':'Profil ')+'„'+(name||'')+'“';
+}
+function _closeStateOf(kind, id){
+  const s=window._closeState||{};
+  if(kind==='account') return s.account||{};
+  return ((s.entities||[]).find(function(e){ return e.kind===kind && (kind==='coach' || String(e.id)===String(id)); }))||{};
+}
+// Karta jednoho profilu: stav + tlačítka. Do Správy účtu a do nastavení klubu / kouče.
+function _closeCardHtml(kind, id, name){
+  const EN=LANG==='en', st=_closeStateOf(kind, id), what=_closeWhat(kind, name, EN);
+  const btn=function(act, lbl, red){ return '<button class="_clBtn" data-act="'+act+'" data-kind="'+kind+'" data-id="'+escapeHtml(String(id||''))+'" data-name="'+escapeHtml(name||'')+'" style="flex:1;padding:10px 8px;border-radius:10px;font-size:13px;font-weight:800;cursor:pointer;font-family:inherit;'
+    +(red?'background:#FEECEC;color:var(--red);border:1px solid #F3C9C0;':'background:#fff;color:var(--dark);border:1px solid var(--border);')+'">'+lbl+'</button>'; };
+  let stTxt='', btns='';
+  if(st.closingAt){
+    stTxt='<div style="font-size:12.5px;color:#8B1E1E;font-weight:700;margin-top:4px;">🗑️ '+(EN?('Deleted completely on '+_closeDate(st.deleteOn)+' — hidden from everyone already.'):('Kompletně se vymaže '+_closeDate(st.deleteOn)+' — už teď je skrytý všem.'))+'</div>';
+    btns=btn('restore', '↩️ '+(EN?'Restore':'Obnovit'), false);
+  } else if(st.pausedAt){
+    stTxt='<div style="font-size:12.5px;color:#1B3A63;font-weight:700;margin-top:4px;">⏸️ '+(EN?'Paused — hidden, nothing new is sold.':'Pozastaveno — skrytý, nic nového se neprodá.')+'</div>';
+    btns=btn('unpause', '▶️ '+(EN?'Resume':'Zrušit pozastavení'), false)+btn('close', '🗑️ '+(EN?'Delete':'Smazat'), true);
+  } else {
+    btns=btn('pause', '⏸️ '+(EN?'Pause':'Pozastavit'), false)+btn('close', '🗑️ '+(EN?'Delete':'Smazat'), true);
+  }
+  return '<div style="border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:10px;background:var(--surf);">'
+    +'<div style="font-size:14px;font-weight:800;color:var(--dark);">'+escapeHtml(what)+'</div>'+stTxt
+    +'<div style="display:flex;gap:8px;margin-top:10px;">'+btns+'</div></div>';
+}
+function _closeWire(root){
+  root.querySelectorAll('._clBtn').forEach(function(b){ b.onclick=function(){ _closeAction(b.dataset.act, b.dataset.kind, b.dataset.id||null, b.dataset.name||''); }; });
+}
+async function _closeAction(act, kind, id, name){
+  const EN=LANG==='en';
+  if(act==='close') return openCloseFlow(kind, id, name);
+  if(act==='pause'){
+    const msg=kind==='account'
+      ? (EN?'Pause the whole account? You and all your profiles disappear from search and nothing new is sold. Existing bookings and memberships carry on. You can resume anytime.':'Pozastavit celý účet? Ty i všechny tvoje profily zmizíte z vyhledávání a nic nového se neprodá. Stávající rezervace a členství běží dál. Kdykoli to vrátíš.')
+      : (EN?(_closeWhat(kind,name,EN)+' disappears from search and nothing new is sold on it. Existing bookings, memberships and history carry on. You can resume anytime. Pause?'):(_closeWhat(kind,name,EN)+' zmizí z vyhledávání a nic nového se na něm neprodá. Stávající rezervace, členství a historie běží dál. Kdykoli to vrátíš. Pozastavit?'));
+    if(!confirm(msg)) return;
+  }
+  try{
+    await _closeApi({ action:act, kind:kind, id:id });
+    toast(act==='restore'?(EN?'✅ Restored — the deletion is cancelled':'✅ Obnoveno — výmaz je zrušený'):act==='pause'?(EN?'⏸️ Paused':'⏸️ Pozastaveno'):(EN?'✅ Resumed':'✅ Pozastavení zrušeno'),1);
+    if(kind==='account' && currentUser){ if(act==='restore') currentUser.deleted_at=null; if(act==='pause') currentUser.deactivated_at=new Date().toISOString(); if(act==='unpause') currentUser.deactivated_at=null; }
+    if(kind==='coach' && currentUser && act==='restore') currentUser.coach_closing_at=null;
+  }catch(e){ toast('⚠️ '+((e&&e.message)||''),1); }
+  _closeRefresh();
+}
+// Správa účtu a soukromí: všechny profily pod sebou.
+function _renderDangerList(){
+  const host=$('dangerEntities'); if(!host || !currentUser) return;
+  const EN=LANG==='en', s=window._closeState||{};
+  const ents=(s.entities||[]);
+  let h='';
+  ents.forEach(function(e){ h+=_closeCardHtml(e.kind, e.id, e.name); });
+  h+=_closeCardHtml('account', currentUser.id, '');
+  host.innerHTML=h; _closeWire(host);
+  ['setDelCoach','setDelGym','setDeactivate','setDelAccount'].forEach(function(x){ if($(x)) $(x).style.display='none'; });
+}
+// Nastavení klubu / kouče: karta toho jednoho profilu dole.
+function _closeInject(sheetId){
+  try{
+    if(!currentUser) return;
+    let kind=null, id=null, name='';
+    if(sheetId==='shGymManage'){ const g=window._myGymData; if(!g || !g.id || String(g.owner_id)!==String(currentUser.id)) return; kind='gym'; id=g.id; name=g.name||''; }
+    if(sheetId==='shCoachSettings'){ if(currentUser.coach_status!=='approved' && !currentUser.coach_closing_at) return; kind='coach'; id=currentUser.id; name=currentUser.name||''; }
+    if(sheetId==='shOrgApply'){ const o=window._orgApproved; if(!o || !o.id || String(o.owner_id)!==String(currentUser.id) || o.status!=='approved') return; kind='org'; id=o.id; name=o.name||''; }
+    if(!kind) return;
+    const sh=$(sheetId); if(!sh) return;
+    let box=sh.querySelector('._closeBox');
+    if(!box){ box=document.createElement('div'); box.className='_closeBox'; box.style.cssText='padding:6px 20px 40px;'; const host=sh.querySelector('#gymManageContent')||sh.lastElementChild; (host&&host.parentNode===sh?sh:host.parentNode||sh).appendChild(box); }
+    box.innerHTML='<div style="font-size:11px;font-weight:700;color:var(--light);letter-spacing:.08em;margin:18px 0 10px;">'+(LANG==='en'?'PAUSE OR DELETE THIS PROFILE':'POZASTAVIT NEBO SMAZAT TENTO PROFIL')+'</div>'+_closeCardHtml(kind, id, name);
+    _closeWire(box);
+  }catch(e){}
+}
+async function openCloseFlow(kind, id, name){
+  const EN=LANG==='en', what=_closeWhat(kind, name, EN);
+  const ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99999;display:flex;align-items:flex-end;justify-content:center;';
+  ov.innerHTML='<div id="_clCard" style="background:#fff;width:100%;max-width:520px;border-radius:18px 18px 0 0;padding:22px;max-height:90vh;overflow-y:auto;box-sizing:border-box;font-family:\'DM Sans\';"></div>';
+  document.body.appendChild(ov);
+  const card=ov.querySelector('#_clCard'); const close=function(){ ov.remove(); };
+  ov.onclick=function(e){ if(e.target===ov) close(); };
+  const H=function(t){ return '<div style="font-size:18px;font-weight:800;color:var(--dark);margin-bottom:6px;">'+t+'</div>'; };
+  const P=function(t){ return '<div style="font-size:13.5px;color:var(--mid);line-height:1.55;margin-bottom:12px;">'+t+'</div>'; };
+  // 1) Pozastavit, nebo opravdu smazat?
+  card.innerHTML=H('🗑️ '+(EN?'Delete: ':'Smazat: ')+escapeHtml(what))
+    +P(EN?'If you just need a break, pause instead — nothing is lost and you come back with one click.':'Jestli potřebuješ jen pauzu, radši pozastav — nic se neztratí a vrátíš se jedním klikem.')
+    +(_closeStateOf(kind,id).pausedAt?'':'<button id="_clPauseTop" style="width:100%;padding:11px;background:#EEF4FF;color:#1B3A63;border:1px solid #CFE0FF;border-radius:11px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;margin-bottom:14px;">⏸️ '+(EN?'Pause instead':'Radši jen pozastavit')+'</button>')
+    +'<div style="font-size:12px;font-weight:800;color:var(--light);letter-spacing:.04em;margin:4px 0 8px;">'+(EN?'WHY ARE YOU LEAVING?':'PROČ ODCHÁZÍŠ?')+'</div>'
+    +'<div id="_clReasons" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;">'+_CLOSE_REASONS.map(function(r){ return '<button data-k="'+r[0]+'" style="padding:8px 11px;border:1px solid var(--border);border-radius:999px;background:#fff;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;color:var(--dark);">'+(EN?r[2]:r[1])+'</button>'; }).join('')+'</div>'
+    +'<div id="_clHint"></div>'
+    +'<textarea id="_clReason" rows="2" maxlength="1000" placeholder="'+(EN?'Anything else? (optional)':'Chceš nám něco vzkázat? (nepovinné)')+'" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:inherit;font-size:14px;margin-bottom:12px;"></textarea>'
+    +'<div id="_clPv">'+P(EN?'Loading what is paid after the deletion date…':'Načítám, co je zaplacené po datu výmazu…')+'</div>'
+    +'<button id="_clNo" style="width:100%;padding:11px;background:none;border:none;color:var(--mid);font-weight:700;cursor:pointer;font-family:inherit;margin-top:6px;">'+(EN?'Back':'Zpět')+'</button>';
+  card.querySelector('#_clNo').onclick=close;
+  { const _pt=card.querySelector('#_clPauseTop'); if(_pt) _pt.onclick=function(){ close(); _closeAction('pause', kind, id, name); }; }
+  let reasonKey=null;
+  const hints={
+    temporary:{ cs:'Na tohle je <b>Pozastavit</b>: profil zmizí, nic se neprodá a nic neplatíš — a za měsíc ho vrátíš jedním klikem, i se všemi lidmi a historií.', en:'That is what <b>Pause</b> is for: the profile disappears, nothing is sold, you pay nothing — and you bring it back in one click, with all your people and history.', pause:true },
+    expensive:{ cs:'MTL bere jen podíl z toho, co přes appku opravdu prodáš — když nic neprodáš, nic neplatíš. Sazbu a co ti MTL přineslo vidíš v <b>Platby a provize</b>. Napiš nám, podíváme se na to spolu.', en:'MTL only takes a share of what you actually sell through the app — sell nothing, pay nothing. Your rate is in <b>Payments & commission</b>. Write to us and we will look at it together.', support:true },
+    no_students:{ cs:'Napiš nám — projdeme spolu profil, ceny a rozvrh, aby tě lidi v okolí našli. Mezitím můžeš profil jen pozastavit.', en:'Write to us — we will go through your profile, prices and schedule so people nearby find you. Meanwhile you can just pause.', support:true, pause:true },
+    complicated:{ cs:'Nastavení s tebou rádi projdeme — napiš nám a ozve se ti přímo zakladatel MTL.', en:'We are happy to set it up with you — write to us and the MTL founder will get back to you.', support:true },
+  };
+  card.querySelectorAll('#_clReasons button').forEach(function(b){ b.onclick=function(){
+    reasonKey=b.dataset.k;
+    card.querySelectorAll('#_clReasons button').forEach(function(x){ const on=x===b; x.style.background=on?'var(--dark)':'#fff'; x.style.color=on?'#fff':'var(--dark)'; });
+    const h=hints[reasonKey], box=card.querySelector('#_clHint');
+    if(!h){ box.innerHTML=''; return; }
+    box.innerHTML='<div style="background:#EEF4FF;border:1px solid #CFE0FF;border-radius:12px;padding:12px;margin-bottom:12px;font-size:13px;line-height:1.55;color:#1B3A63;">'+(EN?h.en:h.cs)
+      +'<div style="display:flex;gap:8px;margin-top:10px;">'+(h.pause?'<button id="_clGoPause" style="flex:1;padding:10px;background:#1B3A63;color:#fff;border:none;border-radius:10px;font-weight:800;font-size:13px;cursor:pointer;font-family:inherit;">⏸️ '+(EN?'Pause instead':'Radši pozastavit')+'</button>':'')
+      +(h.support?'<button id="_clGoSup" style="flex:1;padding:10px;background:#fff;color:#1B3A63;border:1px solid #CFE0FF;border-radius:10px;font-weight:800;font-size:13px;cursor:pointer;font-family:inherit;">💬 '+(EN?'Write to us':'Napsat nám')+'</button>':'')+'</div></div>';
+    const gp=box.querySelector('#_clGoPause'); if(gp) gp.onclick=function(){ close(); _closeAction('pause', kind, id, name); };
+    const gs=box.querySelector('#_clGoSup'); if(gs) gs.onclick=function(){ close(); try{ if(typeof openSupport==='function') openSupport(); else if(typeof openSupportChat==='function') openSupportChat(); else openSheet('shSupport'); }catch(e){} };
+  }; });
+  // 2) Náhled: co platí až po datu výmazu, předplatná, překážky.
+  let pv=null;
+  try{ pv=await _closeApi({ action:'preview', kind:kind, id:id }); }catch(e){ card.querySelector('#_clPv').innerHTML=P('⚠️ '+escapeHtml((e&&e.message)||'')); return; }
+  if(!ov.isConnected) return;
+  const dOn=_closeDate(pv.deleteOn), s=pv.summary||{ count:0 };
+  const money=function(obj){ return Object.keys(obj||{}).map(function(c){ return fmtPrice((obj[c]||0)/100, c)+' '+_curSym(c); }).join(' + '); };
+  let h='<div style="background:var(--surf);border-radius:12px;padding:12px;margin-bottom:12px;font-size:13px;line-height:1.6;color:var(--dark);">'
+    +'<div>📅 <b>'+(EN?'Deletion date: ':'Datum výmazu: ')+dOn+'</b></div>'
+    +'<div>'+(EN?'From now on it is hidden from everyone and nothing new is sold. Paid bookings before that date carry on as normal.':'Od teď je skrytý všem a nic nového se neprodá. Zaplacené rezervace do toho data normálně dojedou.')+'</div>'
+    +(pv.subscriptions?('<div>🔁 '+(EN?(pv.subscriptions+' membership(s) will stop renewing.'):('Přestane se obnovovat '+pv.subscriptions+' členství / předplatné.'))+'</div>'):'')
+    +(pv.ownSubscriptions?('<div>🔁 '+(EN?('Your own '+pv.ownSubscriptions+' membership(s) elsewhere will stop renewing.'):('Tvoje vlastní členství jinde ('+pv.ownSubscriptions+') se přestane obnovovat.'))+'</div>'):'')
+    +'</div>';
+  if(pv.blockers && pv.blockers.length){
+    h+='<div style="background:#FEECEC;border:1px solid #F3C9C0;border-radius:12px;padding:12px;margin-bottom:12px;font-size:13px;line-height:1.55;color:#8B1E1E;">⛔ '+(EN?'A club with a co-owner cannot be deleted together with the account — transfer ownership first, or remove the co-owner: ':'Klub se spolumajitelem nejde smazat spolu s účtem — nejdřív převeď vlastnictví, nebo spolumajitele odeber: ')+pv.blockers.map(function(b){ return '<b>'+escapeHtml(b.name||'')+'</b>'; }).join(', ')+'</div>';
+    card.querySelector('#_clPv').innerHTML=h; return;
+  }
+  if(s.count){
+    h+='<div style="font-size:12px;font-weight:800;color:var(--light);letter-spacing:.04em;margin:4px 0 8px;">'+(EN?'PAID FOR AFTER '+dOn:'ZAPLACENO NA DOBU PO '+dOn)+' · '+s.count+'</div>'
+      +'<details style="margin-bottom:10px;"><summary style="cursor:pointer;font-size:13px;font-weight:700;color:var(--dark);">'
+      +(money(s.card)?((EN?'Card: ':'Kartou: ')+money(s.card)):'')+(money(s.card)&&money(s.bank)?' · ':'')+(money(s.bank)?((EN?'Transfer / cash: ':'Převodem / hotově: ')+money(s.bank)):'')+(s.manual?(' · '+(EN?'courses: ':'kurzy: ')+s.manual):'')+' ›</summary>'
+      +'<div style="font-size:12.5px;color:var(--mid);line-height:1.6;margin-top:6px;">'+(pv.items||[]).map(function(i){ return '• '+escapeHtml(i.who)+' — '+escapeHtml(i.label)+(i.refund?(' — '+fmtPrice(i.refund/100,i.currency)+' '+_curSym(i.currency)):'')+(i.method==='manual'?(EN?' (settle yourself)':' (vypořádáš sám)'):''); }).join('<br>')+'</div></details>'
+      +'<label style="display:flex;gap:10px;align-items:flex-start;padding:11px;border:1.5px solid var(--border);border-radius:12px;margin-bottom:8px;cursor:pointer;font-size:13.5px;line-height:1.5;"><input type="radio" name="_clMode" value="refund" style="margin-top:3px;"><span><b>'+(EN?'Refund 100 % of the unused part':'Vrátím 100 % nevyčerpané části')+'</b><br><span style="color:var(--mid);">'+(EN?('On '+dOn+': card automatically from your Stripe account, transfers and cash you send back yourself (you get a list).'):('Dne '+dOn+': kartou automaticky z tvého Stripe účtu, převody a hotovost vrátíš sám (dostaneš seznam).'))+'</span></span></label>'
+      +'<label style="display:flex;gap:10px;align-items:flex-start;padding:11px;border:1.5px solid var(--border);border-radius:12px;margin-bottom:12px;cursor:pointer;font-size:13.5px;line-height:1.5;"><input type="radio" name="_clMode" value="fulfil" style="margin-top:3px;"><span><b>'+(EN?'I will provide it outside the app':'Splním to mimo aplikaci')+'</b><br><span style="color:var(--mid);">'+(EN?'No refunds — customers are told to arrange it with you directly.':'Peníze se nevrací — zákazníci dostanou zprávu, ať se domluví přímo s tebou.')+'</span></span></label>';
+  }
+  const consent=EN
+    ? (what+' will be deleted irreversibly on '+dOn+'. Until then it is hidden from everyone and nothing new is sold; I can cancel this request until then. Receipts, transactions, consents and attendance history stay stored as the law requires.')
+    : (what+' se dne '+dOn+' nevratně vymaže. Do té doby je skrytý všem a nic nového se neprodá; žádost můžu do té doby zrušit. Doklady, transakce, souhlasy a historie docházky zůstávají uložené, jak ukládá zákon.');
+  h+='<label style="display:flex;gap:10px;align-items:flex-start;font-size:13px;line-height:1.5;color:var(--dark);margin-bottom:12px;cursor:pointer;"><input type="checkbox" id="_clOk" style="width:20px;height:20px;flex-shrink:0;margin:0;accent-color:var(--red);"><span>'+escapeHtml(consent)+'</span></label>'
+    +'<button id="_clGo" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit;">🗑️ '+(EN?'Request deletion':'Požádat o výmaz')+'</button>';
+  card.querySelector('#_clPv').innerHTML=h;
+  card.querySelector('#_clGo').onclick=async function(){
+    const btn=this;
+    const m=card.querySelector('input[name="_clMode"]:checked');
+    if(s.count && !m){ toast(EN?'⚠️ Choose what happens with what is paid after the deletion date':'⚠️ Vyber, jak naložit s tím, co je zaplacené po datu výmazu',1); return; }
+    if(!card.querySelector('#_clOk').checked){ toast(EN?'⚠️ Tick that you understand':'⚠️ Zaškrtni, že tomu rozumíš',1); return; }
+    btn.disabled=true; btn.textContent='…';
     try{
-      if(kind==='account'){ await supaClient.from('profiles').update({deleted_at:new Date().toISOString(), delete_reason:reason}).eq('id',currentUser.id); toast(LANG==='en'?'Account scheduled for deletion.':'Účet naplánován ke smazání.'); try{ await supaClient.auth.signOut(); }catch(e){} setTimeout(()=>location.reload(),1200); return; }
-      if(kind==='coach'){ await supaClient.from('profiles').update({coach_status:'deleted', coach_deleted_at:new Date().toISOString(), delete_reason:reason}).eq('id',currentUser.id); currentUser.coach_status='deleted'; toast(LANG==='en'?'Coach profile removed.':'Profil kouče smazán.'); close(); if(typeof updateRoleUI==='function') updateRoleUI(); if(typeof setupDangerZone==='function') setupDangerZone(); return; }
-      if(kind==='gym'){ var _gx=(window._myGyms||[]).find(function(x){ return String(x.id)===String(gymId); }); if(_gx&&_gx._isCoOwner){ toast(LANG==='en'?'Co-owners cannot delete the club':'Spolumajitel nemůže smazat klub'); btn.disabled=false; btn.textContent=LANG==='en'?'Delete':'Smazat'; return; } await supaClient.from('gyms').update({deleted_at:new Date().toISOString(), delete_reason:reason}).eq('id',gymId); if(window._myGyms) window._myGyms=window._myGyms.filter(x=>String(x.id)!==String(gymId)); toast(LANG==='en'?'Club profile removed.':'Profil klubu smazán.'); close(); if(typeof setupDangerZone==='function') setupDangerZone(); return; }
-    }catch(e){ toast('\u26A0\uFE0F '+(e.message||'')); btn.disabled=false; btn.textContent=LANG==='en'?'Delete':'Smazat'; }
+      await _closeApi({ action:'close', kind:kind, id:id, mode:(m?m.value:'fulfil'), reason_key:reasonKey, reason:(card.querySelector('#_clReason').value||'').trim(), consent_text:consent });
+      close();
+      if(kind==='account' && currentUser) currentUser.deleted_at=new Date().toISOString();
+      if(kind==='coach' && currentUser) currentUser.coach_closing_at=new Date().toISOString();
+      _minorInfoPopup(EN?'Deletion requested':'Žádost o výmaz přijata', escapeHtml(EN?(what+' is hidden from everyone now and will be deleted on '+dOn+'. You can cancel it until then from the bar at the top. We have sent you a confirmation e-mail.'):(what+' je od teď skrytý všem a vymaže se '+dOn+'. Do té doby to zrušíš v proužku nahoře. Potvrzení ti přišlo e-mailem.')), 'OK');
+    }catch(e){ btn.disabled=false; btn.textContent='🗑️ '+(EN?'Request deletion':'Požádat o výmaz'); toast('⚠️ '+((e&&e.message)||''),1); }
+    _closeRefresh();
   };
 }
+// Dřívější okno „Smazat" (jen zapsalo datum z prohlížeče) nahradil openCloseFlow -- vše dělá server.
+function openDeleteFlow(kind, gymId, gymName){ return openCloseFlow(kind, gymId||null, gymName||''); }
 checkAuth();
 
   const COMMISSION = 0.15; // MTL 15% z rate kouče (5% cut + 10% markup)
@@ -57145,6 +57514,7 @@ async function showPaidPopup(){
   // k rozhodnutí, ?go=xferdone&k=&id=&s= -> po převodu (nový majitel rovnou ke kartě na provizi).
   // Návrat z banky po připojení účtu k párování plateb (Nastavení plateb).
   if(params.get('pairlink')){ const _pl=params.get('pairlink'); try{ const _u=new URL(location.href); _u.searchParams.delete('pairlink'); _u.searchParams.delete('clientId'); history.replaceState(null,'',_u.pathname+(_u.search||'')+_u.hash); }catch(e){} setTimeout(function(){ _pairLinkReturn(_pl); }, 800); }
+  if(params.get('go')==='closing'){ setTimeout(function(){ try{ if(currentUser) openSheet('shDanger'); }catch(e){} }, 1400); }
   if(params.get('go')==='blocked'){ setTimeout(function(){ try{ if(currentUser) _showAccountBlocked({}); }catch(e){} }, 1200); }
   if(params.get('go')==='paidfor'){ setTimeout(function(){ try{ if(currentUser) openPaidFor(); }catch(e){} }, 1200); }
   if(params.get('go')==='xfer' || params.get('go')==='xferdone'){
