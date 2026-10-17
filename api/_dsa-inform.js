@@ -2,7 +2,9 @@
 // Když se MTL dozví, že poskytovatel (obchodník) přes MTL nabízel nezákonný produkt nebo službu,
 // informuje všechny, kdo si to u něj přes MTL koupili v posledních 6 měsících a na koho má
 // kontakt: (a) že produkt / služba je nezákonná, (b) kdo je obchodník (identita z dokladu),
-// (c) jaké má prostředky nápravy. Kdo kontakt nemá (host bez e-mailu), na toho musí MTL
+// (c) jaké má prostředky nápravy. Podle VOP: všichni, kdo si u něj v posledních 6 měsících něco
+// rezervovali nebo koupili -- proto se kromě transakcí berou i rezervace, členství, lístky a kurzy
+// (i bezplatné, např. zkušební trénink). Kdo kontakt nemá (host bez e-mailu), na toho musí MTL
 // informaci zveřejnit -- výsledek proto vrací počet lidí bez kontaktu.
 // Volá admin-terminate.js a admin-suspend.js (jen zakladatel).
 import { get, one, notify, log } from './_entity-close.js';
@@ -39,8 +41,26 @@ export async function dsaInformBuyers({ kind, id, name, illegal, redress, by }) 
   // Kupující s účtem: kdo platil (paid_by), jinak za koho (member_id).
   const users = new Set();
   paid.forEach((t) => { const u = t.paid_by || t.member_id; if (u) users.add(String(u)); });
-  // Hosté bez účtu: e-mail z dokladu.
+  // Rezervace a přihlášky bez platby (zkušební trénink, rezervace lekce, kurz, lístek zdarma).
   const guestMail = new Set();
+  const add = (rows, uk, mk) => (rows || []).forEach((r) => { if (r[uk]) users.add(String(r[uk])); else if (mk && r[mk]) guestMail.add(String(r[mk]).trim().toLowerCase()); });
+  const S = `created_at=gte.${q(since)}`;
+  try {
+    if (kind === 'gym') {
+      add(await get(`gym_bookings?gym_id=eq.${q(id)}&${S}&select=student_id,guest_email&limit=20000`), 'student_id', 'guest_email');
+      add(await get(`gym_class_reservations?gym_id=eq.${q(id)}&${S}&select=student_id&limit=20000`), 'student_id');
+      add(await get(`gym_memberships?gym_id=eq.${q(id)}&${S}&select=student_id&limit=20000`), 'student_id');
+      const coh = ((await get(`gym_cohorts?gym_id=eq.${q(id)}&select=id&limit=2000`)) || []).map((c) => c.id);
+      for (let i = 0; i < coh.length; i += 100) add(await get(`cohort_members?cohort_id=in.(${coh.slice(i, i + 100).map(q).join(',')})&${S}&select=student_id,email&limit=20000`), 'student_id', 'email');
+    } else if (kind === 'coach') {
+      add(await get(`bookings?coach_id=eq.${q(id)}&${S}&select=student_id&limit=20000`), 'student_id');
+      add(await get(`gym_memberships?coach_id=eq.${q(id)}&gym_id=is.null&${S}&select=student_id&limit=20000`), 'student_id');
+    }
+    const evF = kind === 'gym' ? `gym_id=eq.${q(id)}` : kind === 'org' ? `organization_id=eq.${q(id)}` : `created_by=eq.${q(id)}&gym_id=is.null&organization_id=is.null`;
+    const evs = ((await get(`events?${evF}&select=id&limit=2000`)) || []).map((e) => e.id);
+    for (let i = 0; i < evs.length; i += 100) add(await get(`event_tickets?event_id=in.(${evs.slice(i, i + 100).map(q).join(',')})&${S}&select=buyer_id,buyer_email&limit=20000`), 'buyer_id', 'buyer_email');
+  } catch (e) { console.error('[dsa-inform] reservations', e.message); }
+  // Hosté bez účtu u plateb: e-mail z dokladu.
   const withoutUser = paid.filter((t) => !(t.paid_by || t.member_id)).map((t) => t.id);
   let noContact = 0;
   for (let i = 0; i < withoutUser.length; i += 100) {
@@ -57,8 +77,8 @@ export async function dsaInformBuyers({ kind, id, name, illegal, redress, by }) 
     + para(`<b>${en0 ? 'What was illegal' : 'Co bylo v rozporu s právem'}:</b> ${esc(illegal)}`)
     + para(`<b>${en0 ? 'Trader' : 'Obchodník (poskytovatel)'}:</b> ${esc(trader.name)}${trader.ico ? (en0 ? ', ID ' : ', IČO ') + esc(trader.ico) : ''}${trader.address ? ', ' + esc(trader.address) : ''}`)
     + para(`<b>${en0 ? 'What you can do' : 'Co můžeš dělat'}:</b> ${esc(redress)}`)
-    + para(en0 ? 'We are informing everyone who bought from this trader through MTL in the last 6 months (EU Digital Services Act, Art. 32).'
-      : 'Informujeme všechny, kdo si u tohoto obchodníka přes MTL koupili něco za posledních 6 měsíců (Akt o digitálních službách EU, čl. 32).')
+    + para(en0 ? 'We are informing everyone who booked or bought from this trader through MTL in the last 6 months (EU Digital Services Act, Art. 32).'
+      : 'Informujeme všechny, kdo si u tohoto obchodníka přes MTL v posledních 6 měsících něco rezervovali nebo koupili (Akt o digitálních službách EU, čl. 32).')
     + button(APP_URL + '/?go=bookings', en0 ? 'My purchases' : 'Moje nákupy');
   let informed = 0, emailed = 0;
   for (const uid of users) {
