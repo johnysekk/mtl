@@ -4417,6 +4417,9 @@ async function _kidMigrateLink(i){
   catch(e){ try{ const ta=document.createElement('textarea'); ta.value=link; ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); toast(EN?'✅ Transfer link copied':'✅ Odkaz zkopírován'); }catch(e2){ toast(link); } }
 }
 
+// Kontakt / děti cizího člověka: zakladatel vidí celý profil, poskytovatel jen svého člověka
+// (člen, svěřenec, člen týmu) -- pohledy profiles_admin / profiles_contact (sql/rls-3-profiles.sql).
+function _profX(){ try{ return (currentUser && FOUNDER_UUID && String(currentUser.id)===String(FOUNDER_UUID)) ? 'profiles_admin' : 'profiles_contact'; }catch(e){ return 'profiles_contact'; } }
 async function _consumeMigrate(token){
   if(!token) return;
   let _w=0; while(!currentUser && _w<30){ await new Promise(function(r){ setTimeout(r,200); }); _w++; }
@@ -4427,27 +4430,21 @@ async function _consumeMigrate(token){
   if(!row) return;
   if(row.claimed_by){ if(String(row.claimed_by)!==String(currentUser.id)) toast(EN?'This transfer link was already used.':'Tento přenosový odkaz už byl použit.'); return; }
   if(String(row.parent_id)===String(currentUser.id)){ toast(EN?'Open this link on the child new account, not on yours.':'Otevři tento odkaz na novém účtu dítěte, ne na svém.'); return; }
+  // Převzetí dělá server (mtl_consume_migration): označí dítě u rodiče, přepíše docházku a odkaz
+  // spotřebuje. Účet dítěte do profilu rodiče sám nesahá.
   let kidBelts={}; let kidName=row.kid_name||'';
   try{
-    const { data:pp } = await supaClient.from('profiles').select('children').eq('id',row.parent_id).single();
-    let kids=[]; try{ kids=typeof pp.children==='string'?JSON.parse(pp.children):(pp.children||[]); }catch(e){}
-    const kid=(kids||[]).find(function(x){ return x && (String(x.id)===String(row.kid_id) || (row.kid_name && x.name===row.kid_name)); });
-    if(kid){
-      kidName=kid.name||kidName;
-      try{ kidBelts=kid.belts?(typeof kid.belts==='string'?JSON.parse(kid.belts):kid.belts):{}; }catch(e){ kidBelts={}; }
-      try{ const ni=kids.indexOf(kid); if(ni>=0){ kids[ni]._archived=true; kids[ni]._migrated=true; kids[ni]._migratedTo=currentUser.id; await supaClient.from('profiles').update({ children:JSON.stringify(kids) }).eq('id',row.parent_id); } }catch(e){}
-    }
-  }catch(e){}
+    const { data:res, error } = await supaClient.rpc('mtl_consume_migration', { p_token: token });
+    if(error || !res || res.error){ if(res && res.error==='used') toast(EN?'This transfer link was already used.':'Tento přenosový odkaz už byl použit.'); return; }
+    kidName=res.kid_name||kidName;
+    try{ kidBelts=res.belts?(typeof res.belts==='string'?JSON.parse(res.belts):res.belts):{}; }catch(e){ kidBelts={}; }
+  }catch(e){ return; }
   // transfer belts (merge, never overwrite an existing key)
   try{
     let mine=currentUser.belts?(typeof currentUser.belts==='string'?JSON.parse(currentUser.belts):currentUser.belts):{};
     let changed=false; Object.keys(kidBelts||{}).forEach(function(key){ if(mine[key]==null){ mine[key]=kidBelts[key]; changed=true; } });
     if(changed){ await supaClient.from('profiles').update({ belts:JSON.stringify(mine) }).eq('id',currentUser.id); currentUser.belts=JSON.stringify(mine); }
   }catch(e){}
-  // re-point training history (gym_attendance) from parent+child_name to the new account
-  try{ if(kidName){ await supaClient.from('gym_attendance').update({ student_id:currentUser.id, student_name:kidName, child_name:null }).eq('student_id',row.parent_id).eq('child_name',kidName); } }catch(e){}
-  // mark token claimed
-  try{ await supaClient.from('migration_tokens').update({ claimed_by:currentUser.id, claimed_at:new Date().toISOString() }).eq('token',token); }catch(e){}
   _migrateGuardianOffer(row.parent_id, kidName);
 }
 
@@ -4815,7 +4812,7 @@ async function _famRenderRequests(){
   const names={};
   try{
     const ids=rows.map(function(r){ return r.member_id; }).filter(Boolean);
-    if(ids.length){ const { data:ps }=await supaClient.from('profiles').select('id,name,birthdate,is_minor').in('id',ids);
+    if(ids.length){ const { data:ps }=await supaClient.from('profiles_family').select('id,name,birthdate,is_minor').in('id',ids);
       (ps||[]).forEach(function(p){ names[p.id]=p; }); }
   }catch(e){}
   box.innerHTML=rows.map(function(r){
@@ -4989,7 +4986,7 @@ async function _famRenderConsents(){
         (async function(){
           try{
             if(d.gym_id){
-              const { data:_g }=await supaClient.from('gyms').select('*').eq('id',d.gym_id).single();
+              const { data:_g }=await supaClient.from('gyms_pub').select('*').eq('id',d.gym_id).single();
               if(_g && typeof openGymProfile==='function'){ closeSheet('shMyKids'); openGymProfile(_g); }
             } else {
               toast(LANG==='en'?'Open the club to pay':'Otevři klub a zaplať');
@@ -5548,7 +5545,7 @@ let _famMineCache=null;
 async function _ensureMyBirthdate(){
   if(!currentUser) return null;
   if(currentUser.birthdate!==undefined) return currentUser.birthdate?_famAge(currentUser.birthdate):null;
-  try{ const { data }=await supaClient.from('profiles').select('birthdate,is_minor').eq('id',currentUser.id).single();
+  try{ const { data }=await supaClient.from('profiles_me').select('birthdate,is_minor').eq('id',currentUser.id).single();
     currentUser.birthdate=(data&&data.birthdate)||null;
     if(data&&data.is_minor!=null && currentUser.is_minor==null) currentUser.is_minor=data.is_minor;
   }catch(e){ currentUser.birthdate=null; }
@@ -5558,7 +5555,7 @@ function _famAge(s){ try{ const d=new Date(s); if(isNaN(d.getTime())) return nul
 async function _famMineInfo(){
   if(_famMineCache) return _famMineCache;
   let minor=false;
-  try{ const { data }=await supaClient.from('profiles').select('is_minor,birthdate').eq('id',currentUser.id).single();
+  try{ const { data }=await supaClient.from('profiles_me').select('is_minor,birthdate').eq('id',currentUser.id).single();
     if(data){ if(data.birthdate){ const a=_famAge(data.birthdate); minor=(a!=null)?(a<18):!!data.is_minor; } else minor=!!data.is_minor; } }catch(e){}
   _famMineCache={minor:minor}; return _famMineCache;
 }
@@ -5572,7 +5569,7 @@ async function _loadFamilyAccts(){
   try{ const { data }=await supaClient.from('family_links').select('*').or('guardian_id.eq.'+me+',member_id.eq.'+me); rows=data||[]; }catch(e){}
   const otherIds=[...new Set(rows.map(r=> r.guardian_id===me ? r.member_id : r.guardian_id).filter(Boolean))];
   let nm={};
-  if(otherIds.length){ try{ const { data:ps }=await supaClient.from('profiles').select('id,name,photo_url,photo_thumb,children,is_minor,birthdate').in('id',otherIds);
+  if(otherIds.length){ try{ const { data:ps }=await supaClient.from('profiles_family').select('id,name,photo_url,photo_thumb,children,is_minor,birthdate').in('id',otherIds);
     // MLADISTVÝ PODLE DATA NAROZENÍ. Příznak is_minor se přepočítá, až se ten člověk sám přihlásí --
     // kdo mezitím dovršil 18, vypadal u rodiče pořád jako mladistvý a jiné dítě bez příznaku naopak ne.
     (ps||[]).forEach(p=>{ if(p.birthdate){ const _a=_famAge(p.birthdate); if(_a!=null) p.is_minor=(_a<18); } nm[p.id]=p; }); }catch(e){} }
@@ -6983,7 +6980,7 @@ async function loadCoaches() {
     data = r.data; error = r.error;
     if(error){ // PostGIS not deployed yet -> graceful fallback to the old bounding box
       const _BOX = 6; _coachCenter = null;
-      const fb = await supaClient.from('profiles').select('*').eq('coach_status','approved').is('deleted_at', null).or('and(city_lat.gte.'+(ulat-_BOX)+',city_lat.lte.'+(ulat+_BOX)+',city_lng.gte.'+(ulng-_BOX)+',city_lng.lte.'+(ulng+_BOX)+'),city_lat.is.null').limit(2000);
+      const fb = await supaClient.from('profiles_pub').select('*').eq('coach_status','approved').is('deleted_at', null).or('and(city_lat.gte.'+(ulat-_BOX)+',city_lat.lte.'+(ulat+_BOX)+',city_lng.gte.'+(ulng-_BOX)+',city_lng.lte.'+(ulng+_BOX)+'),city_lat.is.null').limit(2000);
       data = fb.data; error = fb.error;
     }
   } else if(_uCC || ucountry){
@@ -6991,11 +6988,11 @@ async function loadCoaches() {
     // jsou názvy anglicky (sql-66) -- tahle větev tedy v české appce nevracela ani jednoho
     // kouče. _deckCountryOr matchuje kód i oba názvy, takže projde i starší řádek bez kódu.
     const _or=(typeof _deckCountryOr==='function' && _uCC) ? _deckCountryOr(_uCC) : null;
-    let _q = supaClient.from('profiles').select('*').eq('coach_status','approved').is('deleted_at', null);
+    let _q = supaClient.from('profiles_pub').select('*').eq('coach_status','approved').is('deleted_at', null);
     _q = _or ? _q.or(_or) : _q.eq('country', ucountry);
     const r = await _q.limit(2000); data=r.data; error=r.error;
   } else {
-    const r = await supaClient.from('profiles').select('*').eq('coach_status','approved').is('deleted_at', null).limit(1000); data=r.data; error=r.error;
+    const r = await supaClient.from('profiles_pub').select('*').eq('coach_status','approved').is('deleted_at', null).limit(1000); data=r.data; error=r.error;
   }
 
   if (error) { console.error('Supabase error:', error); toast(L('⚠️ Chyba načítání')); return; }
@@ -7019,7 +7016,7 @@ async function appendDojoSenseis(){
   const vis=(links||[]).filter(l=>!l.is_reception && l.deck_visible!==false);
   if(!vis.length) return;
   const gymIds=[...new Set(vis.map(l=>l.gym_id))];
-  const { data:gyms2 } = await supaClient.from('gyms').select('*').in('id', gymIds).is('deleted_at', null);
+  const { data:gyms2 } = await supaClient.from('gyms_pub').select('*').in('id', gymIds).is('deleted_at', null);
   const gymMap={}; (gyms2||[]).forEach(g=>{ gymMap[g.id]=g; });
   const have=new Set(COACHES.map(c=>c.id));
   const coachIds=[...new Set(vis.map(l=>l.coach_id))].filter(id=>!have.has(id));
@@ -7338,7 +7335,7 @@ function _renderSearchResults(rows, q){
     b.onclick=async function(){
       const id=b.dataset.id;
       try{
-        if(b.dataset.kind==='gym'){ const { data }=await supaClient.from('gyms').select('*').eq('id',id).single(); if(data) openGymProfile(data); }
+        if(b.dataset.kind==='gym'){ const { data }=await supaClient.from('gyms_pub').select('*').eq('id',id).single(); if(data) openGymProfile(data); }
         else { if(typeof openProfileById==='function') openProfileById(id); }
       }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
     };
@@ -10208,7 +10205,7 @@ async function loadFavorites(){
   let extra = [];
   if(missing.length){
     try{
-      const { data:rows } = await supaClient.from('profiles').select('*').in('id', missing).eq('coach_status','approved').is('deleted_at', null);
+      const { data:rows } = await supaClient.from('profiles_pub').select('*').in('id', missing).eq('coach_status','approved').is('deleted_at', null);
       extra = (rows||[]).filter(r=> !r.account_suspended && !(typeof window._coachNotReady==='function' && window._coachNotReady(r))).map(_mapCoachRow);
     }catch(e){}
   }
@@ -10378,7 +10375,7 @@ async function _bookingFamilyOptions(){
   const others=[...new Set(rows.map(r=> r.guardian_id===me?r.member_id:r.guardian_id).filter(Boolean))];
   if(others.length){
     let nm={}, mn={};
-    try{ const { data:ps }=await supaClient.from('profiles').select('id,name,is_minor,birthdate').in('id',others); (ps||[]).forEach(p=>{ nm[p.id]=p.name||''; const a=p.birthdate?_famAge(p.birthdate):null; mn[p.id]=(a!=null)?(a<18):!!p.is_minor; }); }catch(e){}
+    try{ const { data:ps }=await supaClient.from('profiles_family').select('id,name,is_minor,birthdate').in('id',others); (ps||[]).forEach(p=>{ nm[p.id]=p.name||''; const a=p.birthdate?_famAge(p.birthdate):null; mn[p.id]=(a!=null)?(a<18):!!p.is_minor; }); }catch(e){}
     rows.forEach(r=>{ const oid=r.guardian_id===me?r.member_id:r.guardian_id; if(!oid) return; out.push({ key:'acct:'+oid, id:oid, name:nm[oid]||'', isMinor:!!mn[oid], isChild:false }); });
   }
   const seen={}; return out.filter(x=>{ if(seen[x.key]) return false; seen[x.key]=1; return true; });
@@ -11198,7 +11195,7 @@ function _myBuyerCC(){ try{ if(!currentUser) return ''; const v=currentUser.resi
 async function _olIntlBlock(c){
   const coachId=c.profileId||c.id; if(currentUser && String(coachId)===String(currentUser.id)) return null;
   let intl=c.onlineIntl, ccc=String(c.billingCC||'').toUpperCase();
-  if(intl===undefined || !ccc){ try{ const { data }=await supaClient.from('profiles').select('*').eq('id',coachId).single(); if(data){ intl=(data.online_intl===true); ccc=String(data.billing_country||data.country_code||'').toUpperCase(); c.onlineIntl=intl; c.billingCC=ccc; } }catch(e){} }
+  if(intl===undefined || !ccc){ try{ const { data }=await supaClient.from('profiles_pub').select('*').eq('id',coachId).single(); if(data){ intl=(data.online_intl===true); ccc=String(data.billing_country||data.country_code||'').toUpperCase(); c.onlineIntl=intl; c.billingCC=ccc; } }catch(e){} }
   if(intl===true) return null;
   const scc=_myBuyerCC();
   if(!ccc || !scc || ccc===scc) return null;
@@ -11688,7 +11685,7 @@ async function eventEligibleGyms(){
   try{
     const { data:links } = await supaClient.from('gym_coaches').select('gym_id').eq('coach_id', currentUser.id).eq('status','active').eq('can_create_events', true);
     const ids=(links||[]).map(l=>l.gym_id).filter(id=>!seen[id]);
-    if(ids.length){ const { data:gs } = await supaClient.from('gyms').select('*').in('id', ids).eq('status','approved'); (gs||[]).forEach(g=>{ if(!seen[g.id]){ seen[g.id]=1; out.push(g); } }); }
+    if(ids.length){ const { data:gs } = await supaClient.from('gyms_pub').select('*').in('id', ids).eq('status','approved'); (gs||[]).forEach(g=>{ if(!seen[g.id]){ seen[g.id]=1; out.push(g); } }); }
   }catch(e){}
   return out;
 }
@@ -11991,7 +11988,7 @@ async function renderMyEvManage(){
     if(ownedIds.length){ const { data:gymEvs } = await supaClient.from('events').select('*').in('gym_id',ownedIds).order('starts_at',{ascending:true}); (gymEvs||[]).forEach(e=>{ if(!hosted.find(x=>x.id===e.id)) hosted.push(e); }); }
   }catch(e){}
   window._mineHosted=hosted; window._evGymCache=window._evGymCache||{};
-  try{ const need=[...new Set(hosted.map(e=>e.gym_id).filter(id=>id && !ownedIds.includes(id) && !window._evGymCache[id]))]; if(need.length){ const { data:gs } = await supaClient.from('gyms').select('*').in('id',need); (gs||[]).forEach(g=>window._evGymCache[g.id]=g); } }catch(e){}
+  try{ const need=[...new Set(hosted.map(e=>e.gym_id).filter(id=>id && !ownedIds.includes(id) && !window._evGymCache[id]))]; if(need.length){ const { data:gs } = await supaClient.from('gyms_pub').select('*').in('id',need); (gs||[]).forEach(g=>window._evGymCache[g.id]=g); } }catch(e){}
   const stLbl=st=>st==='approved'?'Live':st==='pending'?(LANG==='en'?'Pending':'Čeká'):st==='rejected'?(LANG==='en'?'Rejected':'Zamítnuto'):st;
   const stCol=st=>st==='approved'?'#006040':st==='pending'?'#B85C00':'var(--red)';
   html += `<div style="font-size:13px;font-weight:800;color:var(--dark);margin:0 0 10px;">📋 ${LANG==='en'?'My events':'Moje akce'}</div>`;
@@ -12259,7 +12256,7 @@ async function _openEventEdit(evOrId, focus){
       if(!host){ const { data }=await supaClient.from('organizations').select('*').eq('id',ev.organization_id).maybeSingle(); host=data; }
     } else if(ev.gym_id){
       host=(window._myGyms||[]).find(function(g){ return String(g.id)===String(ev.gym_id); })||(window._evGymCache&&window._evGymCache[ev.gym_id])||null;
-      if(!host){ const { data }=await supaClient.from('gyms').select('*').eq('id',ev.gym_id).maybeSingle(); host=data; }
+      if(!host){ const { data }=await supaClient.from('gyms_pub').select('*').eq('id',ev.gym_id).maybeSingle(); host=data; }
     }
   }catch(e){}
   await openEventCreate(host||_myGymData, ev);
@@ -16072,7 +16069,7 @@ async function openGymProfile(g){
   if(_gid){
     const _me = currentUser && currentUser.id;
     [_pFull, _pCps, _pOwner, _pCoachN, _pRatings, _pAtt, _pMemb] = await Promise.all([
-      supaClient.from('gyms').select('*').eq('id', _gid).single().then(r=>r,()=>({})),
+      supaClient.from('gyms_pub').select('*').eq('id', _gid).single().then(r=>r,()=>({})),
       supaClient.from('gym_coach_pricing').select('*').eq('gym_id', _gid).eq('status','approved').then(r=>r,()=>({})),
       _oid ? supaClient.from('profiles').select('name, partner, partner_tier, coach_status').eq('id', _oid).single().then(r=>r,()=>({})) : Promise.resolve({}),
       supaClient.from('gym_coaches').select('id',{count:'exact',head:true}).eq('gym_id', _gid).eq('status','active').then(r=>r,()=>({})),
@@ -16780,7 +16777,7 @@ async function _payReqGo(_rq){
                 if(!ok) return;
                 const _c=(typeof COACHES!=='undefined'?COACHES:[]).find(function(x){ return (x.profileId||x.id)===_rq.coach_id; });
                 let _co=_c;
-                if(!_co){ const { data:_p }=await supaClient.from('profiles').select('*').eq('id',_rq.coach_id).single(); _co=_p?(typeof _mapCoachRow==='function'?_mapCoachRow(_p):_p):null; }
+                if(!_co){ const { data:_p }=await supaClient.from('profiles_pub').select('*').eq('id',_rq.coach_id).single(); _co=_p?(typeof _mapCoachRow==='function'?_mapCoachRow(_p):_p):null; }
                 if(!_co){ toast(LANG==='en'?'Coach not found':'Kouč nenalezen'); return; }
                 window._payOnBehalf={ id:_rq.minor_id, name:_rq.minor_name||'', minor:true };
                 setTimeout(function(){ window._payOnBehalf=null; }, 15*60000);
@@ -16791,7 +16788,7 @@ async function _payReqGo(_rq){
               return;
             }
             if(_rq.gym_id){
-              const { data:_g }=await supaClient.from('gyms').select('*').eq('id',_rq.gym_id).single();
+              const { data:_g }=await supaClient.from('gyms_pub').select('*').eq('id',_rq.gym_id).single();
               if(_g){
                 window._currentGym=_g;
                 // Platí zástupce, ale rezervace patří mladistvému -- proto _forWhom. Stripe cesta
@@ -16824,7 +16821,7 @@ async function _payReqGo(_rq){
 async function _payReqDetail(d, onPay){
   const EN=LANG==='en';
   let gym=null, plan=null;
-  try{ if(d.gym_id){ const { data:_g }=await supaClient.from('gyms').select('*').eq('id',d.gym_id).single(); gym=_g||null;
+  try{ if(d.gym_id){ const { data:_g }=await supaClient.from('gyms_pub').select('*').eq('id',d.gym_id).single(); gym=_g||null;
     if(gym && d.plan_id){ let _pl=gym.membership_plans; try{ if(typeof _pl==='string') _pl=JSON.parse(_pl); }catch(e){ _pl=[]; } plan=(_pl||[]).find(function(x){ return String(x.id)===String(d.plan_id); })||null; } } }catch(e){}
   const cur=d.currency||'CZK'; const amt=(d.amount!=null)?(fmtPrice(d.amount,cur)+' '+_curSym(cur)):'';
   const row=function(l,v){ return v?('<div style="display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);font-size:13.5px;"><span style="color:var(--mid);">'+l+'</span><b style="text-align:right;">'+escapeHtml(String(v))+'</b></div>'):''; };
@@ -17955,7 +17952,7 @@ async function loadMyMemberships(){
   try{ const { data: pd } = await supaClient.from('gym_memberships').select('*').eq('student_id', currentUser.id).eq('status','pending_offline').order('created_at',{ascending:false}); pend=pd||[]; }catch(e){}
   // načti kluby (foto + proklik na profil)
   let gymMap={};
-  try{ const gymIds=[...new Set([...ms,...pend].map(m=>m.gym_id).filter(Boolean))]; if(gymIds.length){ const { data: gg } = await supaClient.from('gyms').select('*').in('id', gymIds); (gg||[]).forEach(g=>{ gymMap[g.id]=g; }); } }catch(e){}
+  try{ const gymIds=[...new Set([...ms,...pend].map(m=>m.gym_id).filter(Boolean))]; if(gymIds.length){ const { data: gg } = await supaClient.from('gyms_pub').select('*').in('id', gymIds); (gg||[]).forEach(g=>{ gymMap[g.id]=g; }); } }catch(e){}
   window._membGymMap = gymMap;
   let attMap={};
   try{ const { data: aa } = await supaClient.from('gym_attendance').select('gym_id').eq('student_id', currentUser.id).is('child_name',null); (aa||[]).forEach(a=>{ attMap[a.gym_id]=(attMap[a.gym_id]||0)+1; }); }catch(e){}
@@ -18127,7 +18124,7 @@ async function loadMyMemberships(){
 }
 async function payGraceDoplatek(gymId){
   let g=(window._membGymMap||{})[gymId];
-  if(!g){ try{ const { data } = await supaClient.from('gyms').select('*').eq('id',gymId).single(); g=data; }catch(e){} }
+  if(!g){ try{ const { data } = await supaClient.from('gyms_pub').select('*').eq('id',gymId).single(); g=data; }catch(e){} }
   if(!g){ toast('⚠️'); return; }
   let n=0; try{ const { count } = await supaClient.from('grace_visits').select('id',{count:'exact',head:true}).eq('student_id',currentUser.id).eq('gym_id',gymId).eq('settled',false).eq('settlement','billed'); n=count||0; }catch(e){}
   if(!n){ toast(LANG==='en'?'Nothing to settle':'Nic k doplacení'); if(typeof loadMyMemberships==='function') loadMyMemberships(); return; }
@@ -18975,13 +18972,13 @@ async function resumeMembership(id, gymId, subId){
 let _myGymData = null, _gymSchedule = [], _gymPlans = [], _gymOrgForm = 'profit', _gymMonth = null, _schedEdit = -1, _schedWeek = 0, _schedSelDow = null;
 async function checkGymOwnership(){
   if(!currentUser){ if($('meGymManage')) $('meGymManage').style.display='none'; return; }
-  const { data } = await supaClient.from('gyms').select('*').eq('owner_id', currentUser.id).eq('status','approved').order('created_at',{ascending:true});
+  const { data } = await supaClient.from('gyms_mine').select('*').eq('owner_id', currentUser.id).eq('status','approved').order('created_at',{ascending:true});
   let approved = (data||[]).map(function(g){ g._isCoOwner=false; return g; });
   try{
     const { data:_coLinks } = await supaClient.from('gym_coaches').select('gym_id').eq('coach_id', currentUser.id).eq('co_owner', true).eq('status','active');
     const _ownIds=approved.map(function(g){ return String(g.id); });
     const _coIds=[...new Set((_coLinks||[]).map(function(l){ return l.gym_id; }).filter(Boolean))].filter(function(id){ return _ownIds.indexOf(String(id))<0; });
-    if(_coIds.length){ const { data:_coGyms } = await supaClient.from('gyms').select('*').in('id', _coIds).eq('status','approved'); (_coGyms||[]).forEach(function(g){ g._isCoOwner=true; approved.push(g); }); }
+    if(_coIds.length){ const { data:_coGyms } = await supaClient.from('gyms_mine').select('*').in('id', _coIds).eq('status','approved'); (_coGyms||[]).forEach(function(g){ g._isCoOwner=true; approved.push(g); }); }
   }catch(e){ console.warn('co-owner gyms', e); }
   window._myGyms = approved;
   try{ if(window._refreshPayEntry) window._refreshPayEntry(); }catch(e){}
@@ -19510,6 +19507,8 @@ function renderInviteLink(kind, pfx){
   const box=$(boxId); if(!box||!_myGymData) return;
   const col = kind==='recep' ? 'invite_token_recep' : 'invite_token_team';
   const tok=_myGymData[col];
+  // Tokeny nejsou ve veřejném řádku klubu -- dočtou se z gyms_mine (majitel / správce týmu).
+  if(!tok && !_myGymData['_tok_'+col]){ _myGymData['_tok_'+col]=1; (async function(){ try{ const { data }=await supaClient.from('gyms_mine').select(col).eq('id',_myGymData.id).maybeSingle(); if(data && data[col]){ _myGymData[col]=data[col]; renderInviteLink(kind, pfx); } }catch(e){} })(); }
   const role = kind==='recep' ? (LANG==='en'?'receptionist':'recepčního') : (LANG==='en'?'coach/sensei':'kouče/senseie');
   if(!tok){
     box.innerHTML = `<button class="genInvBtn" data-k="${kind}" style="width:100%;padding:10px;background:var(--bg);border:1.5px dashed var(--border);border-radius:10px;font-weight:700;color:var(--dark);cursor:pointer;font-size:13px;">${LANG==='en'?'🔗 Create invite link':'🔗 Vytvořit zvací odkaz'}</button>`;
@@ -19563,8 +19562,9 @@ async function processPendingJoin(){
   if(!currentUser){ try{ localStorage.setItem('mtl_join', tok); }catch(e){} return; }
   try{ localStorage.removeItem('mtl_join'); }catch(e){}
   let g=null, isRecep=false;
-  try{ const { data } = await supaClient.from('gyms').select('id,name,owner_id,invite_token_team,invite_token_recep').or('invite_token_team.eq.'+tok+',invite_token_recep.eq.'+tok).limit(1);
-    if(data&&data.length){ g=data[0]; isRecep=(g.invite_token_recep===tok); } }catch(e){}
+  // Klub ke zvacímu odkazu najde server (tokeny klubů appka číst nesmí).
+  try{ const { data } = await supaClient.rpc('mtl_gym_by_invite', { p_token: tok });
+    if(data&&data.length){ g=data[0]; isRecep=!!g.is_recep; } }catch(e){}
   if(!g){ toast(LANG==='en'?'Invite link invalid or expired':'Zvací odkaz neplatný nebo expirovaný'); return; }
   if(g.owner_id===currentUser.id){ toast(LANG==='en'?"That's your own klub":'To je tvůj vlastní klub'); return; }
   try{ const { data:ex } = await supaClient.from('gym_coaches').select('id,status').eq('gym_id',g.id).eq('coach_id',currentUser.id).limit(1);
@@ -19743,7 +19743,7 @@ async function openTeamManage(gymId, gymName){
   // Původní hodnotu vrátíme při zavření, ať se majiteli nerozhodí jeho vlastní nastavení.
   window._tmPrevGym=window._myGymData;
   try{
-    const { data:g } = await supaClient.from('gyms').select('*').eq('id', gymId).maybeSingle();
+    const { data:g } = await supaClient.from('gyms_mine').select('*').eq('id', gymId).maybeSingle();
     if(!g){ toast(EN?'Club not found':'Klub se nenašel'); return; }
     _myGymData=g; window._myGymData=g;
     renderInviteLink('team', 'tm');
@@ -20143,27 +20143,27 @@ async function loadHealthNotes(){
     const kidBk = [];
     try{ const { data:gb }=await supaClient.from('gym_bookings').select('student_id,class_date,child_name,gym_id').eq('coach_id',me).eq('status','active').gte('class_date',today); (gb||[]).forEach(b=>{ if(!b.student_id) return; if(b.child_name){ kidBk.push({ parent:b.student_id, kid:b.child_name, date:b.class_date, key:'gym:'+b.gym_id }); ids.add(b.student_id); return; } ids.add(b.student_id); _key(b.student_id, 'gym:'+b.gym_id); if(b.class_date&&(!up[b.student_id]||b.class_date<up[b.student_id])) up[b.student_id]=b.class_date; }); }catch(e){}
     if(!ids.size){ box.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;">${LANG==='en'?'No upcoming students.':'Žádní nadcházející svěřenci.'}</p>`; return; }
-    const { data:profs }=await supaClient.from('profiles').select('id,name,health_note,health_note_updated,children,health_consent_at').in('id',[...ids]);
-    // Sdílení (health_shares): klíč „majitel|osoba|klub/kouč".
-    const shared=new Set();
-    try{ const { data:hs }=await supaClient.from('health_shares').select('owner_id,person_key,gym_id,coach_id').in('owner_id',[...ids]);
-      (hs||[]).forEach(function(r){ shared.add(r.owner_id+'|'+r.person_key+'|'+(r.gym_id?('gym:'+r.gym_id):('coach:'+r.coach_id))); }); }catch(e){}
-    const wn=(profs||[]).filter(x=>x.health_note&&x.health_note.trim()&&x.health_consent_at&&[...(keysBy[x.id]||[])].some(function(k){ return shared.has(x.id+'|self|'+k); }));
-    // Children come out as rows of their own, named after the child rather than the parent, so a
-    // coach reading the list sees who is actually on the mat.
-    const byId={}; (profs||[]).forEach(x=>{ byId[x.id]=x; });
-    const seenKid={};
-    kidBk.forEach(function(kb){
-      const key=kb.parent+'|'+kb.kid; if(seenKid[key]) { if(kb.date && kb.date<seenKid[key]) seenKid[key]=kb.date; return; }
-      seenKid[key]=kb.date;
-      const par=byId[kb.parent]; if(!par) return;
-      let kids=[]; try{ kids = par.children ? (typeof par.children==='string'?JSON.parse(par.children):par.children) : []; }catch(e){ kids=[]; }
-      const k=(Array.isArray(kids)?kids:[]).find(function(x){ return x && x.name===kb.kid; });
-      if(!k || !k.health || !String(k.health).trim() || !k.health_consent_at || !shared.has(kb.parent+'|'+_kidKey(k)+'|'+kb.key)) return;
-      const rowId='kid:'+kb.parent+':'+kb.kid;
-      up[rowId]=kb.date;
-      wn.push({ id:rowId, name:kb.kid+' ('+(LANG==='en'?'child of ':'d\u00edt\u011b \u2014 ')+(par.name||'')+')', health_note:k.health, health_note_updated:k.health_at||null });
-    });
+    // Poznámky vydá server (mtl_shared_health) -- jen to, co člověk s tímhle koučem / klubem sám
+    // sdílí. Dřív appka načetla zdravotní poznámky všech svěřenců a třídila je až u sebe.
+    const nm={}; try{ const { data:pn }=await supaClient.from('profiles').select('id,name').in('id',[...ids]); (pn||[]).forEach(function(x){ nm[x.id]=x.name||''; }); }catch(e){}
+    const wn=[];
+    await Promise.all([...ids].map(async function(sid){
+      let rows=[]; try{ const { data }=await supaClient.rpc('mtl_shared_health', { p_owner:sid }); rows=data||[]; }catch(e){}
+      rows.forEach(function(r){
+        const k=(r.provider_kind==='gym'?'gym:':'coach:')+r.provider_id;
+        if(r.person_key==='self'){
+          if(!(keysBy[sid] && keysBy[sid].has(k)) || wn.some(function(w){ return w.id===sid; })) return;
+          wn.push({ id:sid, name:nm[sid]||r.person_name||'', health_note:r.note, health_note_updated:r.updated_at||null });
+          return;
+        }
+        // Dítě jako vlastní řádek pod svým jménem (kouč vidí, kdo je opravdu na žíněnce).
+        const kbs=kidBk.filter(function(x){ return x.parent===sid && x.kid===r.person_name && x.key===k; });
+        if(!kbs.length) return;
+        const rowId='kid:'+sid+':'+r.person_name; if(wn.some(function(w){ return w.id===rowId; })) return;
+        up[rowId]=kbs.map(function(x){ return x.date; }).filter(Boolean).sort()[0]||null;
+        wn.push({ id:rowId, name:r.person_name+' ('+(LANG==='en'?'child of ':'d\u00edt\u011b \u2014 ')+(nm[sid]||'')+')', health_note:r.note, health_note_updated:r.updated_at||null });
+      });
+    }));
     if(!wn.length){ box.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;">${LANG==='en'?'No health notes from your upcoming students.':'Žádná zdravotní omezení u tvých nadcházejících svěřenců.'}</p>`; return; }
     box.innerHTML=`<p style="font-size:12px;color:var(--light);margin-bottom:14px;line-height:1.5;">${LANG==='en'?'Private notes from your students. Visible only to you, the coach of their lessons.':'Soukromé poznámky tvých svěřenců. Vidíš je jen ty, kouč jejich lekcí.'}</p>`+wn.map(x=>`<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:13px 15px;margin-bottom:10px;"><div style="font-weight:700;margin-bottom:4px;">${escapeHtml(x.name||(LANG==='en'?'Student':'Svěřenec'))}</div><div style="font-size:14px;color:var(--dark);line-height:1.5;white-space:pre-wrap;">${escapeHtml(x.health_note)}</div><div style="font-size:11px;color:var(--light);margin-top:6px;">${LANG==='en'?'Added':'Přidáno'}: ${x.health_note_updated?new Date(x.health_note_updated).toLocaleString(LANG==='en'?'en-GB':'cs-CZ'):'—'}</div></div>`).join('');
   }catch(e){ box.innerHTML=`<p style="padding:20px;color:var(--red);">${e.message}</p>`; }
@@ -20467,7 +20467,7 @@ async function _parentConfirmMigration(reqId, kidName, targetId, approve){
   if(approve){
     if(!confirm(EN?('Move the training history of '+kidName+' to their own account? This confirms they are your child.'):('Přenést historii dítěte '+kidName+' na jeho vlastní účet? Tím potvrzuješ, že je to tvé dítě.'))) return;
     let kBelts={};
-    try{ const { data:pp }=await supaClient.from('profiles').select('children').eq('id',currentUser.id).single(); let kids=[]; try{ kids=typeof pp.children==='string'?JSON.parse(pp.children):(pp.children||[]); }catch(e){} const kid=(kids||[]).find(function(x){ return x&&x.name===kidName&&!x._migrated; }); if(kid){ try{ kBelts=kid.belts?(typeof kid.belts==='string'?JSON.parse(kid.belts):kid.belts):{}; }catch(e){} } }catch(e){}
+    try{ const { data:pp }=await supaClient.from('profiles_me').select('children').eq('id',currentUser.id).single(); let kids=[]; try{ kids=typeof pp.children==='string'?JSON.parse(pp.children):(pp.children||[]); }catch(e){} const kid=(kids||[]).find(function(x){ return x&&x.name===kidName&&!x._migrated; }); if(kid){ try{ kBelts=kid.belts?(typeof kid.belts==='string'?JSON.parse(kid.belts):kid.belts):{}; }catch(e){} } }catch(e){}
     try{
       await _doKidTransfer(currentUser.id, kidName, kBelts, targetId);
       await supaClient.from('migration_requests').update({ status:'approved', parent_confirmed:true, resolved_at:new Date().toISOString() }).eq('id',reqId);
@@ -20491,7 +20491,7 @@ async function _forceMigration(reqId, parentId, kidName, targetId){
   if(!parentId||!kidName||!targetId){ toast(EN?'Cannot resolve parent/kid':'Nelze dohledat rodiče/dítě'); return; }
   if(!confirm(EN?('OVERRIDE: transfer '+kidName+' WITHOUT the guardian confirmation? Use only when the guardian is unreachable. The guardian is notified and MTL can reverse it.'):('OVERRIDE: přenést '+kidName+' BEZ potvrzení rodiče? Jen když je rodič nedostupný. Rodič dostane upozornění a MTL to umí vrátit.'))) return;
   let kBelts={};
-  try{ const { data:pp }=await supaClient.from('profiles').select('children').eq('id',parentId).single(); let kids=[]; try{ kids=typeof pp.children==='string'?JSON.parse(pp.children):(pp.children||[]); }catch(e){} const kid=(kids||[]).find(function(x){ return x&&x.name===kidName&&!x._migrated; }); if(kid){ try{ kBelts=kid.belts?(typeof kid.belts==='string'?JSON.parse(kid.belts):kid.belts):{}; }catch(e){} } }catch(e){}
+  try{ const { data:pp }=await supaClient.from(_profX()).select('children').eq('id',parentId).single(); let kids=[]; try{ kids=typeof pp.children==='string'?JSON.parse(pp.children):(pp.children||[]); }catch(e){} const kid=(kids||[]).find(function(x){ return x&&x.name===kidName&&!x._migrated; }); if(kid){ try{ kBelts=kid.belts?(typeof kid.belts==='string'?JSON.parse(kid.belts):kid.belts):{}; }catch(e){} } }catch(e){}
   try{
     await _doKidTransfer(parentId, kidName, kBelts, targetId);
     await supaClient.from('migration_requests').update({ status:'approved', resolved_by:currentUser.id, resolved_at:new Date().toISOString(), forced:true }).eq('id',reqId);
@@ -20580,7 +20580,7 @@ async function _idApproveMigration(reqId, pid, kidName, targetId, contactParent)
   if(!pid){ toast(EN?'Parent record not resolved \u2014 cannot transfer':'Rodi\u010d nedohled\u00e1n \u2014 nelze p\u0159en\u00e9st'); return; }
   if(!confirm(EN?('Approve and transfer '+kidName+' (verified by ID document)?'):('Schv\u00e1lit a p\u0159en\u00e9st '+kidName+' (ov\u011b\u0159eno dokladem)?'))) return;
   let kBelts={};
-  try{ const { data:pp }=await supaClient.from('profiles').select('children').eq('id',pid).single(); let kids=[]; try{ kids=typeof pp.children==='string'?JSON.parse(pp.children):(pp.children||[]); }catch(e){} const kid=(kids||[]).find(function(x){ return x&&x.name===kidName&&!x._migrated; }); if(kid){ try{ kBelts=kid.belts?(typeof kid.belts==='string'?JSON.parse(kid.belts):kid.belts):{}; }catch(e){} } }catch(e){}
+  try{ const { data:pp }=await supaClient.from(_profX()).select('children').eq('id',pid).single(); let kids=[]; try{ kids=typeof pp.children==='string'?JSON.parse(pp.children):(pp.children||[]); }catch(e){} const kid=(kids||[]).find(function(x){ return x&&x.name===kidName&&!x._migrated; }); if(kid){ try{ kBelts=kid.belts?(typeof kid.belts==='string'?JSON.parse(kid.belts):kid.belts):{}; }catch(e){} } }catch(e){}
   try{
     await _doKidTransfer(pid, kidName, kBelts, targetId);
     await supaClient.from('migration_requests').update({ status:'approved', resolved_at:new Date().toISOString() }).eq('id',reqId);
@@ -20603,7 +20603,7 @@ async function _doKidTransfer(parentId, kidName, kidBelts, targetId){
   try{ await supaClient.from('gym_attendance').update({ student_id:targetId, student_name:kidName, child_name:null }).eq('student_id',parentId).eq('child_name',kidName); }catch(e){}
   // mark the kid migrated in the parent JSON
   try{
-    const { data:pp } = await supaClient.from('profiles').select('children').eq('id',parentId).single();
+    const { data:pp } = await supaClient.from(_profX()).select('children').eq('id',parentId).single();
     let kids=[]; try{ kids=typeof pp.children==='string'?JSON.parse(pp.children):(pp.children||[]); }catch(e){}
     const ni=(kids||[]).findIndex(function(x){ return x && x.name===kidName && !x._migrated; });
     if(ni>=0){ kids[ni]._archived=true; kids[ni]._migrated=true; kids[ni]._migratedTo=targetId; await supaClient.from('profiles').update({ children:JSON.stringify(kids) }).eq('id',parentId); }
@@ -20672,7 +20672,7 @@ function _openMigrateRequest(){
       const _hF=!!(_fF&&_fF.files&&_fF.files[0]), _hB=!!(_fB&&_fB.files&&_fB.files[0]);
       if(_hF!==_hB){ toast(EN?'Add both sides of the ID, or neither':'P\u0159idej ob\u011b strany dokladu, nebo \u017e\u00e1dnou'); return; } }
     const btn=document.getElementById('mrSend'); btn.disabled=true; window._migIdFail=false;
-    let _myDob=null; try{ const {data:_md}=await supaClient.from('profiles').select('birthdate').eq('id',currentUser.id).single(); _myDob=(_md&&_md.birthdate)||null; }catch(e){}
+    let _myDob=null; try{ const {data:_md}=await supaClient.from('profiles_me').select('birthdate').eq('id',currentUser.id).single(); _myDob=(_md&&_md.birthdate)||null; }catch(e){}
     try{
       const _ins=await supaClient.from('migration_requests').insert({ requester_id:currentUser.id, requester_name:(currentUser.name||''), requester_email:(currentUser.email||''), requester_dob:_myDob, kid_name:kid, contact_parent:(window._migCP==='1'), gym_hint:((document.getElementById('mrGym').value||'').trim()||null), belt_hint:((document.getElementById('mrBelt').value||'').trim()||null), note:((document.getElementById('mrNote').value||'').trim()||null) }).select('id').single();
       // supabase-js pri chybe nevyhazuje, jen vrati error. Bez kontroly se ukazalo "Odeslano"
@@ -20907,7 +20907,7 @@ function _migAge(dob){ try{ const t=new Date(String(dob).slice(0,10)+'T00:00:00'
 async function _migKidIndex(){
   if(window._migKidIdx) return window._migKidIdx;
   const out=[];
-  try{ const { data }=await supaClient.from('profiles').select('id,name,children').not('children','is',null).limit(5000);
+  try{ const { data }=await supaClient.from('profiles_admin').select('id,name,children').not('children','is',null).limit(5000);
     (data||[]).forEach(function(p){ let kids=[]; try{ kids=typeof p.children==='string'?JSON.parse(p.children):(p.children||[]); }catch(e){}
       (kids||[]).forEach(function(k){ if(k && k.name && !k._migrated) out.push({ pid:p.id, pname:p.name||'', kid:k }); }); }); }catch(e){}
   window._migKidIdx=out; return out;
@@ -20933,7 +20933,7 @@ async function openMigrationRequests(){
   box.innerHTML='';
   for(const r of reqs){
     // Datum narození: když ho žadatel v době žádosti neměl a doplnil ho později, vezme se z profilu.
-    if(!r.requester_dob && r.requester_id){ try{ const { data:_pd }=await supaClient.from('profiles').select('birthdate').eq('id', r.requester_id).maybeSingle(); if(_pd && _pd.birthdate) r.requester_dob=_pd.birthdate; }catch(e){} }
+    if(!r.requester_dob && r.requester_id){ try{ const { data:_pd }=await supaClient.from('profiles_admin').select('birthdate').eq('id', r.requester_id).maybeSingle(); if(_pd && _pd.birthdate) r.requester_dob=_pd.birthdate; }catch(e){} }
     // verification preview: resolve the claimed parent by email + kid by name + attendance count
     let pInfo=EN?'Parent not resolved yet':'Rodič zatím nedohledán'; let pid=null; let kidFound=false; let attN=0; let dobMatch='unknown'; let vouchGym=null;
     try{
@@ -20942,7 +20942,7 @@ async function openMigrationRequests(){
       try{ const { data:atc } = await supaClient.from('gym_attendance').select('student_id,gym_id').eq('child_name',r.kid_name); (atc||[]).forEach(function(a){ if(a.student_id && candIds.indexOf(a.student_id)<0) candIds.push(a.student_id); }); attN=(atc||[]).length; vouchGym=(atc&&atc[0]&&atc[0].gym_id)||null; }catch(e){}
       let pp=null;
       if(candIds.length){
-        try{ const { data:profs } = await supaClient.from('profiles').select('id,name,children').in('id',candIds);
+        try{ const { data:profs } = await supaClient.from('profiles_admin').select('id,name,children').in('id',candIds);
           const _rdob=r.requester_dob?String(r.requester_dob).slice(0,10):null; let best=null, exact=null;
           (profs||[]).forEach(function(p){ let kids=[]; try{ kids=typeof p.children==='string'?JSON.parse(p.children):(p.children||[]); }catch(e){} const kid=(kids||[]).find(function(x){ return x && x.name===r.kid_name && !x._migrated; }); if(kid){ if(!best) best={p:p,kid:kid}; const _kdob=kid.dob?String(kid.dob).slice(0,10):null; if(_rdob && _kdob && _kdob===_rdob) exact={p:p,kid:kid}; } });
           const chosen=exact||best;
@@ -21030,7 +21030,7 @@ async function _approveMigrationLEGACY(reqId, parentId, kidName, targetId){
   if(!parentId||!kidName||!targetId){ toast(EN?'Cannot resolve parent/kid':'Nelze dohledat rodiče/dítě'); return; }
   if(!confirm(EN?`Verify and transfer ${kidName} belts and training history to this account? This cannot be undone.`:`Ověřit a přenést pásky i historii dítěte ${kidName} na tento účet? Nelze vrátit zpět.`)) return;
   let kBelts={};
-  try{ const { data:pp } = await supaClient.from('profiles').select('children').eq('id',parentId).single(); let kids=[]; try{ kids=typeof pp.children==='string'?JSON.parse(pp.children):(pp.children||[]); }catch(e){} const kid=(kids||[]).find(function(x){ return x && x.name===kidName && !x._migrated; }); if(kid){ try{ kBelts=kid.belts?(typeof kid.belts==='string'?JSON.parse(kid.belts):kid.belts):{}; }catch(e){} } }catch(e){}
+  try{ const { data:pp } = await supaClient.from(_profX()).select('children').eq('id',parentId).single(); let kids=[]; try{ kids=typeof pp.children==='string'?JSON.parse(pp.children):(pp.children||[]); }catch(e){} const kid=(kids||[]).find(function(x){ return x && x.name===kidName && !x._migrated; }); if(kid){ try{ kBelts=kid.belts?(typeof kid.belts==='string'?JSON.parse(kid.belts):kid.belts):{}; }catch(e){} } }catch(e){}
   try{
     await _doKidTransfer(parentId, kidName, kBelts, targetId);
     await supaClient.from('migration_requests').update({ status:'approved', resolved_by:currentUser.id, resolved_at:new Date().toISOString() }).eq('id',reqId);
@@ -21055,7 +21055,7 @@ async function openMtlAds(){
   const EN=LANG==='en';
   if(!currentUser || currentUser.id!==FOUNDER_UUID){ toast(EN?'Founder only':'Jen pro foundera'); return; }
   let px='', tk='';
-  try{ const { data }=await supaClient.from('profiles').select('mtl_eco_pixel,mtl_eco_capi_token').eq('id',FOUNDER_UUID).single(); if(data){ px=data.mtl_eco_pixel||''; tk=data.mtl_eco_capi_token||''; } }catch(e){}
+  try{ const { data }=await supaClient.from('profiles_admin').select('mtl_eco_pixel,mtl_eco_capi_token').eq('id',FOUNDER_UUID).single(); if(data){ px=data.mtl_eco_pixel||''; tk=data.mtl_eco_capi_token||''; } }catch(e){}
   openSheet('shMtlAds');
   const ov=document.getElementById('mtlAdsBody'); if(!ov) return;
   const inp='width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;margin-bottom:12px;';
@@ -21541,7 +21541,7 @@ async function _cohWhoInit(ov, d){
     try{ (typeof _myChildren==='function'?_myChildren():[]).forEach(function(k,i){ if(k && k.name){ const a=k.dob?_famAge(k.dob):null; if(a==null || a<18) opts.push({ v:'kid:'+i, l:k.name+(a!=null?(' ('+a+')'):''), name:k.name, dob:k.dob||'' }); } }); }catch(e){}
     try{ const { data:fl }=await supaClient.from('family_links').select('member_id').eq('guardian_id',currentUser.id).eq('relation','guardian').eq('status','active');
       const ids=(fl||[]).map(function(x){ return x.member_id; }).filter(Boolean);
-      if(ids.length){ const { data:pp }=await supaClient.from('profiles').select('id,name,birthdate').in('id',ids);
+      if(ids.length){ const { data:pp }=await supaClient.from('profiles_family').select('id,name,birthdate').in('id',ids);
         (pp||[]).forEach(function(p){ const a=p.birthdate?_famAge(p.birthdate):null; if(a==null || a<18) opts.push({ v:'acc:'+p.id, l:(p.name||'')+(a!=null?(' ('+a+')'):'')+' \u00b7 '+(EN?'own account':'vlastn\u00ed \u00fa\u010det'), name:p.name||'', dob:p.birthdate||'', sid:p.id }); }); } }catch(e){}
     ov._cohKids=opts;
     sel.innerHTML=opts.map(function(o){ return '<option value="'+escapeHtml(o.v)+'">'+escapeHtml(o.l)+'</option>'; }).join('')
@@ -21841,7 +21841,7 @@ async function openCohortSignup(cohortId, fromColdLink){
     // Přihlášený bez data narození v profilu ho tady vyplnil: uloží se mu i do profilu (jen poprvé).
     { const _bdp=((ov.querySelector('#cohMeDob')||{}).value)||'';
       if(!ov._cohKid && _bdp && typeof currentUser!=='undefined' && currentUser && !currentUser.birthdate){
-        try{ const { error:_be }=await supaClient.from('profiles').update({ birthdate:_bdp }).eq('id',currentUser.id).is('birthdate',null); if(!_be) currentUser.birthdate=_bdp; }catch(e){} } }
+        try{ const { error:_be }=await supaClient.from('profiles').update({ birthdate:_bdp }).eq('id',currentUser.id); if(!_be) currentUser.birthdate=_bdp; }catch(e){} } }
     // U spolku je přihláška povinná: bez členství nemá klub co prodávat jako činnost pro členy.
     {
       const _maChk=ov.querySelector('#cohMemberApp');
@@ -22535,7 +22535,7 @@ async function _cohRender(){
   if($('cohNewBtn')) $('cohNewBtn').style.display=''; if($('cohIntro')) $('cohIntro').style.display='';
   const box=$('cohBody'); if(!box) return; const EN=LANG==='en';
   box.innerHTML='<p style="font-size:12px;color:var(--light);">'+(EN?'Loading...':'Načítám...')+'</p>';
-  let rows=[]; try{ const { data }=await supaClient.from('gym_cohorts').select('*').eq('gym_id',_cohCtx.gymId).eq('owner_id',_cohCtx.ownerId).order('created_at',{ascending:false}); rows=data||[]; }catch(e){}
+  let rows=[]; try{ const { data }=await supaClient.from('gym_cohorts_mine').select('*').eq('gym_id',_cohCtx.gymId).eq('owner_id',_cohCtx.ownerId).order('created_at',{ascending:false}); rows=data||[]; }catch(e){}
   if(!rows.length){ box.innerHTML='<p style="font-size:13px;color:var(--light);text-align:center;padding:18px;">'+(EN?'No cohorts yet. Create your first one above.':'Zatím žádné kurzy. Vytvoř první nahoře.')+'</p>'; return; }
   let counts={}; let agg={signups:0,paid:0,enrolled:0,converted:0,attr:{meta_ads:0,mtl_deck:0,mtl_discovery:0,mtl_alert:0,walk_in:0,direct:0}};
   try{ const ids=rows.map(function(r){return r.id;}); const { data:cm }=await supaClient.from('cohort_members').select('cohort_id,status,attribution').in('cohort_id',ids); (cm||[]).forEach(function(m){ counts[m.cohort_id]=counts[m.cohort_id]||{total:0,paid:0}; counts[m.cohort_id].total++; const _paid=(m.status!=='lead'&&m.status!=='cancelled'); if(_paid) counts[m.cohort_id].paid++; if(m.status!=='cancelled'){ agg.signups++; if(_paid) agg.paid++; if(m.status==='enrolled'||m.status==='converted'||m.status==='completed') agg.enrolled++; if(m.status==='converted') agg.converted++; const _a=(m.attribution&&agg.attr[m.attribution]!==undefined)?m.attribution:'direct'; agg.attr[_a]++; } }); }catch(e){}
@@ -22875,7 +22875,7 @@ async function _cohDelete(cohortId, name){
 }
 async function _cohEdit(cohortId){
   const EN=LANG==='en';
-  let c=null; try{ const { data }=await supaClient.from('gym_cohorts').select('*').eq('id',cohortId).single(); c=data; }catch(e){}
+  let c=null; try{ const { data }=await supaClient.from('gym_cohorts_mine').select('*').eq('id',cohortId).single(); c=data; }catch(e){}
   if(!c){ toast('\u26a0\ufe0f'); return; }
   window._cohEditId=cohortId;
   let _tiers=[]; try{ _tiers=Array.isArray(c.price_tiers)?c.price_tiers:(JSON.parse(c.price_tiers||'[]')); }catch(e){ _tiers=[]; }
@@ -23511,7 +23511,7 @@ async function loadMyTeams(){
   box.querySelectorAll('.mtGymTeamBtn').forEach(b=>b.onclick=()=>openTeamManage(b.dataset.gymid, b.dataset.gym));
   box.querySelectorAll('.mtGymSchedBtn').forEach(b=>b.onclick=async()=>{
     try{
-      const { data:_g }=await supaClient.from('gyms').select('*').eq('id',b.dataset.gymid).single();
+      const { data:_g }=await supaClient.from('gyms_pub').select('*').eq('id',b.dataset.gymid).single();
       if(_g){ _myGymData=_g; window._myGymData=_g; }
       window._gmInitTab=0; openSheet('shGymManage');
       if(typeof renderGymManage==='function') await renderGymManage();
@@ -25490,7 +25490,7 @@ async function _openCancelOccurrence(gid, occ, mode){
 }
 async function _notifOpenAttendance(gymId, occ){
   try{ closeSheet('shNotif'); }catch(e){}
-  try{ if(!_myGymData || _myGymData.id!==gymId){ const { data:g } = await supaClient.from('gyms').select('*').eq('id',gymId).single(); if(g) _myGymData=g; } }catch(e){}
+  try{ if(!_myGymData || _myGymData.id!==gymId){ const { data:g } = await supaClient.from('gyms_pub').select('*').eq('id',gymId).single(); if(g) _myGymData=g; } }catch(e){}
   if(_myGymData && typeof openClassAttendance==='function') openClassAttendance(occ);
   else if(typeof openReception==='function') openReception(gymId);
 }
@@ -26599,7 +26599,7 @@ async function openReception(gymId, gymName){
   if($('recScanBtn')){ $('recScanBtn').textContent=(LANG==='en'?'📷 Scan event tickets':'📷 Skenovat lístky na akci'); $('recScanBtn').style.display='none'; $('recScanBtn').onclick=()=>openEventScanPicker(gymId, nm); try{ const _sc=new Date(Date.now()-36*3600*1000).toISOString(); const {data:_evc}=await supaClient.from('events').select('id').eq('gym_id',gymId).eq('status','approved').gte('starts_at',_sc).limit(1); if(_evc&&_evc.length) $('recScanBtn').style.display='block'; }catch(e){} }
   if($('recMerchBtn')){ $('recMerchBtn').style.display='none'; $('recMerchBtn').onclick=()=>renderRecMerchOrders(); try{ const { data:_mp }=await supaClient.from('merch_orders').select('id').eq('gym_id',gymId).eq('status','paid'); const _mn=(_mp||[]).length; if(_mn){ $('recMerchBtn').textContent='📦 '+(LANG==='en'?'Hand out merch':'Výdej merche')+' ('+_mn+')'; $('recMerchBtn').style.display='block'; } }catch(e){} }
   _recGym=null; _recCoachPricing={};
-  try{ const { data: g } = await supaClient.from('gyms').select('*').eq('id', gymId).single(); _recGym=g||null; }catch(e){}
+  try{ const { data: g } = await supaClient.from('gyms_pub').select('*').eq('id', gymId).single(); _recGym=g||null; }catch(e){}
   _recGymOwnerPartner=false; _recGymOwnerScore=0; _recGymOwnerBankai=false; try{ if(_recGym&&_recGym.owner_id){ const { data:_ro }=await supaClient.from('profiles').select('partner,partner_tier,coach_ref_score,bankai_eligible').eq('id',_recGym.owner_id).single(); _recGymOwnerPartner=_epTierOf(_ro); _recGymOwnerScore=(_ro&&_ro.coach_ref_score)||0; _recGymOwnerBankai=!!(_ro&&_ro.bankai_eligible); } }catch(e){}
   try{ const { data: cps } = await supaClient.from('gym_coach_pricing').select('coach_id,dropin_price,currency,status').eq('gym_id', gymId).eq('status','approved'); (cps||[]).forEach(cp=>{ _recCoachPricing[cp.coach_id]=cp; }); }catch(e){}
   try{ const { data } = await supaClient.from('gym_memberships').select('*').eq('gym_id', gymId).in('status',['active','cancelling']).order('student_name',{ascending:true}); _recMembers = data||[]; }catch(e){ _recMembers=[]; }
@@ -27084,7 +27084,7 @@ function _guestMemb(plan){
   // na student_id a žádné přebírání není potřeba.
   async function _findAccount(em){
     try{
-      const { data }=await supaClient.from('profiles').select('id,name').ilike('email', String(em||'').trim()).maybeSingle();
+      const { data }=await supaClient.rpc('mtl_find_account', { p_email: String(em||'').trim() }).maybeSingle();
       return data||null;
     }catch(e){ return null; }
   }
@@ -34538,7 +34538,7 @@ function _ptrBind(o){
   });
   _sheet('shProfile', async function(){
     const c=window._profOpen; const id=c && (c.profileId||c.id); if(!id) return;
-    const { data } = await supaClient.from('profiles').select('*').eq('id', id).single();
+    const { data } = await supaClient.from('profiles_pub').select('*').eq('id', id).single();
     openProfile(data ? Object.assign({}, c, _mapCoachRow(data)) : c);
   });
 })();
@@ -34595,7 +34595,7 @@ async function _openPersonalData(){
     const m=String(v).trim().match(/^(\d{1,2})\s*\.\s*(\d{1,2})\s*\.\s*(\d{4})$/); if(!m){ toast(EN?'\u26a0\ufe0f Use DD.MM.YYYY':'\u26a0\ufe0f Zadej ve tvaru DD.MM.RRRR'); return; }
     const iso=m[3]+'-'+('0'+m[2]).slice(-2)+'-'+('0'+m[1]).slice(-2); const a=_famAge(iso);
     if(a==null || a<0 || a>110){ toast(EN?'\u26a0\ufe0f Check the date':'\u26a0\ufe0f Zkontroluj datum'); return; }
-    supaClient.from('profiles').update({ birthdate:iso }).eq('id',currentUser.id).is('birthdate',null).then(function(r){ if(r.error){ toast('\u26a0\ufe0f '+r.error.message); return; } currentUser.birthdate=iso; toast(EN?'\u2705 Saved':'\u2705 Ulo\u017eeno',1); reopen(); });
+    supaClient.from('profiles').update({ birthdate:iso }).eq('id',currentUser.id).then(function(r){ if(r.error){ toast('\u26a0\ufe0f '+r.error.message); return; } currentUser.birthdate=iso; toast(EN?'\u2705 Saved':'\u2705 Ulo\u017eeno',1); reopen(); });
   };
   ov.querySelectorAll('.pdDobShare').forEach(function(t){ t.onchange=async function(){
     try{
@@ -35157,7 +35157,7 @@ async function loadNotifications(append){
       el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${notifText(n)}</p><div style="font-size:11px;color:var(--light);margin-top:6px;">${d.getDate()}.${d.getMonth()+1}. ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}</div>${_clickable?`<div style="font-size:12.5px;color:#1e57c9;font-weight:700;margin-top:8px;">${LANG==='en'?'member profile ›':'profil člena ›'}</div>`:''}`;
       if(_clickable){ el.onclick=async()=>{
         try{
-          const { data:g } = await supaClient.from('gyms').select('*').eq('id',dd.gym_id).single();
+          const { data:g } = await supaClient.from('gyms_pub').select('*').eq('id',dd.gym_id).single();
           if(g){ _myGymData=g; window._selectedGymId=g.id; window._myGymData=g; }
         }catch(e){}
         try{ if(dd.sid) openGymMemberDetail(dd.sid, dd.student||''); else { openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); } }catch(e){}
@@ -35407,7 +35407,7 @@ async function loadNotifications(append){
             const j=await r.json().catch(function(){ return {}; }); toast(j&&j.ok?(EN2?'\u2705 Refund recorded':'\u2705 Vr\u00e1cen\u00ed zaps\u00e1no'):('\u26a0\ufe0f '+((j&&j.error)||'error')),1);
           } else if(_pd.student_id && typeof openGymMemberDetail==='function'){ openGymMemberDetail(_pd.student_id, _pd.member||''); }
         }catch(e){} return; }
-        if(k==='autonomy_sunset'){ try{ if(_pd.gym_id){ const { data:_g }=await supaClient.from('gyms').select('*').eq('id',_pd.gym_id).maybeSingle(); if(_g && typeof openGymProfile==='function') openGymProfile(_g); } }catch(e){} return; }
+        if(k==='autonomy_sunset'){ try{ if(_pd.gym_id){ const { data:_g }=await supaClient.from('gyms_pub').select('*').eq('id',_pd.gym_id).maybeSingle(); if(_g && typeof openGymProfile==='function') openGymProfile(_g); } }catch(e){} return; }
         if(k==='dropin_bank_cancelled'){ try{
           const EN2=LANG==='en'; const amtDef=Number(_pd.amount)||0;
           const v=prompt(EN2?'How much did you refund to '+(_pd.member||'the student')+'? (amount)':'Kolik jsi vr\u00e1til/a '+(_pd.member||'svěřenci')+'? (\u010d\u00e1stka)', String(amtDef||''));
@@ -35429,11 +35429,11 @@ async function loadNotifications(append){
         if(k==='dsa_restored'){ try{ closeSheet('shNotif'); }catch(e){} if(_pd.gym_id) openGymProfile({ id:_pd.gym_id }); else if(_pd.coach_id) openProfileById(_pd.coach_id); return; }
         if(k==='dsa_restricted'){ _minorInfoPopup((LANG==='en'?'Content restricted · ':'Omezení obsahu · ')+(_pd.no||''), escapeHtml(notifText(n)), 'OK', null); return; }
         if(k==='pass_transfer_offer'){ try{ closeSheet('shNotif'); }catch(e){} _openPassTransfer(_pd.transfer_id); return; }
-        if(k==='pass_transfer_done'){ try{ if(_pd.gym_id){ const { data:_g }=await supaClient.from('gyms').select('*').eq('id',_pd.gym_id).maybeSingle(); if(_g){ try{ closeSheet('shNotif'); }catch(e){} openGymProfile(_g); } } }catch(e){} return; }
+        if(k==='pass_transfer_done'){ try{ if(_pd.gym_id){ const { data:_g }=await supaClient.from('gyms_pub').select('*').eq('id',_pd.gym_id).maybeSingle(); if(_g){ try{ closeSheet('shNotif'); }catch(e){} openGymProfile(_g); } } }catch(e){} return; }
         if(k==='pass_transfer_decided'){ try{ if(_pd.student_id && typeof openGymMemberDetail==='function') openGymMemberDetail(_pd.student_id, _pd.member||''); }catch(e){} return; }
         if(k==='class_cancelled'){ try{
           if(_pd.choice==='move' && _pd.booking_id){ const { data:_cb }=await supaClient.from('gym_bookings').select('*').eq('id',_pd.booking_id).maybeSingle(); if(_cb && _cb.club_cancel_choice==='move'){ openGymReschedule(_cb); return; } }
-          if((_pd.choice==='member'||_pd.choice==='trial') && _pd.gym_id){ const { data:_g }=await supaClient.from('gyms').select('*').eq('id',_pd.gym_id).maybeSingle(); if(_g){ openGymProfile(_g); return; } }
+          if((_pd.choice==='member'||_pd.choice==='trial') && _pd.gym_id){ const { data:_g }=await supaClient.from('gyms_pub').select('*').eq('id',_pd.gym_id).maybeSingle(); if(_g){ openGymProfile(_g); return; } }
           openSheet('shBookings'); if(typeof loadBookings==='function') loadBookings('upcoming');
         }catch(e){} return; }
         if(k==='pis_creditor_outage'){ try{
@@ -35465,8 +35465,8 @@ async function loadNotifications(append){
             const _wd=JSON.parse(n.data||'{}');
             // Starší notifikace nesly jen název klubu -- dohledat podle něj.
             let _g=null;
-            if(_wd.gym_id){ const { data }=await supaClient.from('gyms').select('*').eq('id',_wd.gym_id).maybeSingle(); _g=data||null; }
-            if(!_g && _wd.gym_name){ const { data }=await supaClient.from('gyms').select('*').eq('name',_wd.gym_name).limit(1); _g=(data&&data[0])||null; }
+            if(_wd.gym_id){ const { data }=await supaClient.from('gyms_pub').select('*').eq('id',_wd.gym_id).maybeSingle(); _g=data||null; }
+            if(!_g && _wd.gym_name){ const { data }=await supaClient.from('gyms_pub').select('*').eq('name',_wd.gym_name).limit(1); _g=(data&&data[0])||null; }
             if(_g && typeof openGymProfile==='function') openGymProfile(_g);
             else toast(LANG==='en'?'\u26a0\ufe0f Club not found':'\u26a0\ufe0f Klub nenalezen');
           }catch(e){}
@@ -35510,7 +35510,7 @@ async function loadNotifications(append){
         else if(k==='class_reminder'){ try{
           let _d={}; try{ _d=JSON.parse(n.data||'{}'); }catch(e){}
           if(_d.gym_id){
-            const { data:_g }=await supaClient.from('gyms').select('*').eq('id',_d.gym_id).maybeSingle();
+            const { data:_g }=await supaClient.from('gyms_pub').select('*').eq('id',_d.gym_id).maybeSingle();
             if(_g && typeof openGymProfile==='function'){ window._gymViewSrc='notif'; openGymProfile(_g); return; }
           }
           openSheet('shBookings'); if(typeof _upTab==='function') _upTab(_d.gym_id?'skup':'priv');
@@ -35518,7 +35518,7 @@ async function loadNotifications(append){
         // Přidání do oblíbených přes odkaz kouče/klubu: notifikace slibovala proklik a nikam nevedla.
         else if(k==='fav_added_coach'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.coach_id && typeof openProfileById==='function') openProfileById(dd.coach_id); }catch(e){} }
         else if(k==='fav_added_gym'){ try{ const dd=JSON.parse(n.data||'{}'); const gid=dd.gym_id||dd.gymId;
-          if(gid) supaClient.from('gyms').select('*').eq('id',gid).maybeSingle().then(function(r){ if(r && r.data && typeof openGymProfile==='function') openGymProfile(r.data); }); }catch(e){} }
+          if(gid) supaClient.from('gyms_pub').select('*').eq('id',gid).maybeSingle().then(function(r){ if(r && r.data && typeof openGymProfile==='function') openGymProfile(r.data); }); }catch(e){} }
         else if(isCoachOnline){ openOnline('coach'); }
         else if(isOnlineDone){ openOnline('student'); }
         // KONKRETNI hlaseni ma prednost pred rozlisenim podle role. Zakladatelska vetev byla
@@ -35534,14 +35534,14 @@ async function loadNotifications(append){
         else if(isMembMine){ openSheet('shMemberships'); loadMyMemberships(); }
         else if(isMembRenewing){ openSheet('shMemberships'); loadMyMemberships(); }
         else if(isCohortEnded){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.cohort_id && typeof openCohortRoster==='function') openCohortRoster(dd.cohort_id, dd.cohort_name||''); }catch(e){} }
-        else if(isMembExpired||isMembExpiring){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ const { data: g }=await supaClient.from('gyms').select('*').eq('id',dd.gym_id).single(); if(g) openGymProfile(g); else toast(L('⚠️ Klub nenalezen')); } }catch(e){ toast(L('⚠️ Klub nenalezen')); } }
+        else if(isMembExpired||isMembExpiring){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ const { data: g }=await supaClient.from('gyms_pub').select('*').eq('id',dd.gym_id).single(); if(g) openGymProfile(g); else toast(L('⚠️ Klub nenalezen')); } }catch(e){ toast(L('⚠️ Klub nenalezen')); } }
         else if(k==='membership_payment_failed'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.url){ window.open(dd.url,'_blank'); } else { openSheet('shMemberships'); loadMyMemberships(); } }catch(e){ openSheet('shMemberships'); loadMyMemberships(); } }
         else if(isExcused){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.student_id){ messageGymMember(dd.student_id, dd.member||''); } else { toast(L('⚠️ Chyba')); } }catch(e){ toast(L('⚠️ Chyba')); } }
         // EP: rovnou nabídka stupňů -- ukazuje dnešní stupeň, naplánovaný přechod, obnovení i zrušení.
         else if(isPartnerGranted||isPartnerCancelSched){ closeAllSheets&&closeAllSheets(); _epReloadMe().then(function(){ openPartnerInfo(); }); }
         else if(isDropMine){ openSheet('shBookings'); if(typeof _upTab==='function') _upTab('skup'); else if(typeof loadBookings==='function') loadBookings('upcoming'); }
-        else if(k==='payment_confirmed'){ var _pcd2={}; try{ _pcd2=JSON.parse(n.data||'{}'); }catch(e){} var _g2=_pcd2.goto; if(_pcd2.sk==='online'){ window._membTab='online'; openSheet('shMemberships'); try{ loadMyMemberships(); }catch(e){} } else if(_pcd2.for_other && _g2!=='courses'){ openSheet('shMyPayments'); try{ _loadMyPayments(); }catch(e){} } else if(_g2==='dropin'){ openSheet('shBookings'); try{ if(typeof _upTab==='function') _upTab('skup'); else if(typeof loadBookings==='function') loadBookings('upcoming'); }catch(e){} } else if(_g2==='bookings'){ openSheet('shBookings'); try{ if(typeof _upTab==='function') _upTab('souk'); else if(typeof loadBookings==='function') loadBookings('upcoming'); }catch(e){} } else if(_g2==='tickets' && $('shMyEvents')){ openSheet('shMyEvents'); } else if(_g2==='courses'){ if(_pcd2.for_other){ try{ if(typeof openMyKids==='function') openMyKids(); }catch(e){} } else { openSheet('shBookings'); try{ if(typeof _upTab==='function') _upTab('kurzy'); }catch(e){} } } else if(_g2==='merch' && _pcd2.gym_id){ try{ var _mg=await supaClient.from('gyms').select('*').eq('id',_pcd2.gym_id).single(); if(_mg&&_mg.data && typeof openGymProfile==='function') openGymProfile(_mg.data); }catch(e){} } else { openSheet('shMemberships'); loadMyMemberships(); } }
-        else if(k==='qr_intent'){ try{ var _qd=JSON.parse(n.data||'{}'); if(!_myGymData && _qd.gym){ try{ var r=await supaClient.from('gyms').select('*').eq('id',_qd.gym).single(); if(r&&r.data) _myGymData=r.data; }catch(e){} } if(_qd.occ && _qd.occ.date && _myGymData){ window._caWantTab='pay'; openClassAttendance(_qd.occ); } else if(_qd.gym && typeof openReception==='function'){ await openReception(_qd.gym, _qd.gym_name||''); try{ _recpQrConfirm({ gym:_recGym, container:$('recList'), back:function(){ if(typeof _recSetMode==='function') _recSetMode('checkin'); } }); }catch(e){} } }catch(e){} }
+        else if(k==='payment_confirmed'){ var _pcd2={}; try{ _pcd2=JSON.parse(n.data||'{}'); }catch(e){} var _g2=_pcd2.goto; if(_pcd2.sk==='online'){ window._membTab='online'; openSheet('shMemberships'); try{ loadMyMemberships(); }catch(e){} } else if(_pcd2.for_other && _g2!=='courses'){ openSheet('shMyPayments'); try{ _loadMyPayments(); }catch(e){} } else if(_g2==='dropin'){ openSheet('shBookings'); try{ if(typeof _upTab==='function') _upTab('skup'); else if(typeof loadBookings==='function') loadBookings('upcoming'); }catch(e){} } else if(_g2==='bookings'){ openSheet('shBookings'); try{ if(typeof _upTab==='function') _upTab('souk'); else if(typeof loadBookings==='function') loadBookings('upcoming'); }catch(e){} } else if(_g2==='tickets' && $('shMyEvents')){ openSheet('shMyEvents'); } else if(_g2==='courses'){ if(_pcd2.for_other){ try{ if(typeof openMyKids==='function') openMyKids(); }catch(e){} } else { openSheet('shBookings'); try{ if(typeof _upTab==='function') _upTab('kurzy'); }catch(e){} } } else if(_g2==='merch' && _pcd2.gym_id){ try{ var _mg=await supaClient.from('gyms_pub').select('*').eq('id',_pcd2.gym_id).single(); if(_mg&&_mg.data && typeof openGymProfile==='function') openGymProfile(_mg.data); }catch(e){} } else { openSheet('shMemberships'); loadMyMemberships(); } }
+        else if(k==='qr_intent'){ try{ var _qd=JSON.parse(n.data||'{}'); if(!_myGymData && _qd.gym){ try{ var r=await supaClient.from('gyms_pub').select('*').eq('id',_qd.gym).single(); if(r&&r.data) _myGymData=r.data; }catch(e){} } if(_qd.occ && _qd.occ.date && _myGymData){ window._caWantTab='pay'; openClassAttendance(_qd.occ); } else if(_qd.gym && typeof openReception==='function'){ await openReception(_qd.gym, _qd.gym_name||''); try{ _recpQrConfirm({ gym:_recGym, container:$('recList'), back:function(){ if(typeof _recSetMode==='function') _recSetMode('checkin'); } }); }catch(e){} } }catch(e){} }
         else if(k==='cover_needed'){ try{ var _cvd=JSON.parse(n.data||'{}'); if(_cvd.req_id){ if(confirm(LANG==='en'?'Take this cover? You will teach this class.':'Vzít tento záskok? Odučíš tuto lekci.')) _acceptCover(_cvd.req_id); } }catch(e){} }
         else if(k==='slot_demand'){ if(typeof openDiary==='function') openDiary(); }
         else if(k==='course_new'){ try{ var _cnd=JSON.parse(n.data||'{}'); if(_cnd.cohort_id){ try{ _setCohSrc('mtl_alert'); }catch(e){} if(typeof openCohortSignup==='function') openCohortSignup(_cnd.cohort_id); } }catch(e){} }
@@ -35703,7 +35703,7 @@ async function loadNotifications(append){
             if(typeof openChatWithPerson==='function') openChatWithPerson(_pd.from_id, _pd.from_name||'');
           }
           else if(_pd.membership){ if($('meGymManage')){ window._gmInitTab=2; openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); setTimeout(function(){ if(window._gmShowTab) window._gmShowTab(2); }, 260); } }
-          else if(_pd.occ && _pd.occ.date && _pd.gym_id){ if(!_myGymData){ try{ var _gr=await supaClient.from('gyms').select('*').eq('id',_pd.gym_id).single(); if(_gr&&_gr.data) _myGymData=_gr.data; }catch(e){} } if(typeof openClassAttendance==='function' && _myGymData){ window._caWantTab=null; openClassAttendance(_pd.occ); } else if($('meGymManage')){ openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); } } else if($('meGymManage')){ openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); } else if(typeof openGymTeamDash==='function'){ openGymTeamDash(); } }
+          else if(_pd.occ && _pd.occ.date && _pd.gym_id){ if(!_myGymData){ try{ var _gr=await supaClient.from('gyms_pub').select('*').eq('id',_pd.gym_id).single(); if(_gr&&_gr.data) _myGymData=_gr.data; }catch(e){} } if(typeof openClassAttendance==='function' && _myGymData){ window._caWantTab=null; openClassAttendance(_pd.occ); } else if($('meGymManage')){ openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); } } else if($('meGymManage')){ openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); } else if(typeof openGymTeamDash==='function'){ openGymTeamDash(); } }
         else if(isTicketMine){ openMyEv('upcoming'); }
         else if(k==='gym_team_joined'){ if($('meGymManage')){ window._gmInitTab=1; openSheet('shGymManage'); renderGymManage(); setTimeout(()=>{ if(window._gmShowTab) window._gmShowTab(1); const d=$('gmTeamSec'); if(d){ d.open=true; try{ d.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} } }, 260); } }
         else if(k==='coach_avail'){ if($('meGymManage')){ window._gmInitTab=1; openSheet('shGymManage'); renderGymManage(); setTimeout(()=>{ if(window._gmShowTab) window._gmShowTab(1); const d=$('gmTeamSec'); if(d){ d.open=true; try{ d.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} } }, 260); } }
@@ -35721,7 +35721,7 @@ async function loadNotifications(append){
             } else if(typeof openGymTeamDash==='function'){ openGymTeamDash(); }
           }catch(e){ if(typeof openGymTeamDash==='function') openGymTeamDash(); }
         }
-        else if(isGymRatePrompt){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ const { data: gg }=await supaClient.from('gyms').select('*').eq('id',dd.gym_id).single(); if(gg){ await openGymProfile(gg); setTimeout(()=>{ const f=$('gymRateForm'); if(f){ _pfShowPaneOf(f); f.style.display='block'; f.scrollIntoView({behavior:'smooth',block:'center'}); } }, 300); } else toast(L('⚠️ Klub nenalezen')); } }catch(e){ toast(L('⚠️ Klub nenalezen')); } }
+        else if(isGymRatePrompt){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ const { data: gg }=await supaClient.from('gyms_pub').select('*').eq('id',dd.gym_id).single(); if(gg){ await openGymProfile(gg); setTimeout(()=>{ const f=$('gymRateForm'); if(f){ _pfShowPaneOf(f); f.style.display='block'; f.scrollIntoView({behavior:'smooth',block:'center'}); } }, 300); } else toast(L('⚠️ Klub nenalezen')); } }catch(e){ toast(L('⚠️ Klub nenalezen')); } }
         else if(isEpCancelled){ openEPFeedback(); }
         else if(isAttendReminder){ try{
           const dd=JSON.parse(n.data||'{}'); const gid=dd.gym_id;
@@ -35734,7 +35734,7 @@ async function loadNotifications(append){
             let _occ={ date:dd.date, time:dd.time, name:dd.className||'', level:'all', coach:null, coachName:'', disc:null };
             if(typeof _notifOpenAttendance==='function'){
               try{
-                if(!_myGymData || _myGymData.id!==gid){ const { data:_g }=await supaClient.from('gyms').select('*').eq('id',gid).single(); if(_g){ _myGymData=_g; window._selectedGymId=_g.id; window._myGymData=_g; } }
+                if(!_myGymData || _myGymData.id!==gid){ const { data:_g }=await supaClient.from('gyms_pub').select('*').eq('id',gid).single(); if(_g){ _myGymData=_g; window._selectedGymId=_g.id; window._myGymData=_g; } }
                 let _sch=[]; try{ _sch=JSON.parse((_myGymData&&_myGymData.schedule)||'[]')||[]; }catch(e){}
                 // Termín se hledá podle DNE A ČASU z notifikace, ne podle základního času lekce.
                 // Základní čas patří jen k základnímu dni; pro ostatní dny je jiný.
@@ -35760,7 +35760,7 @@ async function loadNotifications(append){
         else if(k==='coach_pricing_approved'||k==='coach_pricing_rejected'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ openCoachScheduleEditor(dd.gym_id, dd.gym_name||'Gym'); _sheetParent['shCoachSched']=null; } }catch(e){} }
         else if(isAmbGranted){ if(typeof openAmbassadorDashboard==='function') openAmbassadorDashboard(); }
         else if(isCoachRefAdmin){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.refId) openCoachStats(dd.refId, dd.refName||''); }catch(e){} }
-        else if(k==='cert_recommend'||k==='new_listing'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.target_type==='gym' && dd.target_id){ const { data: g }=await supaClient.from('gyms').select('*').eq('id',dd.target_id).single(); if(g) openGymProfile(g); else toast(L('⚠️ Klub nenalezen')); } else if(dd.target_id){ if(typeof openCoachStats==='function') openCoachStats(dd.target_id, dd.target_name||''); else if(typeof openProfileById==='function') openProfileById(dd.target_id); } }catch(e){} }
+        else if(k==='cert_recommend'||k==='new_listing'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.target_type==='gym' && dd.target_id){ const { data: g }=await supaClient.from('gyms_pub').select('*').eq('id',dd.target_id).single(); if(g) openGymProfile(g); else toast(L('⚠️ Klub nenalezen')); } else if(dd.target_id){ if(typeof openCoachStats==='function') openCoachStats(dd.target_id, dd.target_name||''); else if(typeof openProfileById==='function') openProfileById(dd.target_id); } }catch(e){} }
         else if(k==='commission_collected'||k==='commission_cleared'){ try{ var _cd={}; try{ _cd=JSON.parse(n.data||'{}'); }catch(e){} _openCommissionDoklad(_cd); }catch(e){} }
         // KLUB → Spravovat klub (nahoře výzva „Stržení provize selhalo" se Zaplatit hned a kartou),
         // ORGANIZACE → její Platby a provize, KOUČ → Přehled kouče (stejná výzva). Rozhoduje, čí provize to byla.
@@ -35802,13 +35802,13 @@ async function loadNotifications(append){
         }catch(e){} }
         else if(k==='gym_dropin_booked'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym && dd.occ && dd.occ.date && typeof _notifOpenAttendance==='function'){ _notifOpenAttendance(dd.gym, dd.occ); } else { openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); } }catch(e){} }
         else if(k==='gym_member_joined'){ try{ openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); }catch(e){} }
-        else if(k==='fav_added_gym'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ const { data:g }=await supaClient.from('gyms').select('*').eq('id',dd.gym_id).single(); if(g) openGymProfile(g); } }catch(e){} }
+        else if(k==='fav_added_gym'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ const { data:g }=await supaClient.from('gyms_pub').select('*').eq('id',dd.gym_id).single(); if(g) openGymProfile(g); } }catch(e){} }
         else if(k==='event_ticket_sold'||k==='event_ticket_mine'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.event_id){ const { data:ev }=await supaClient.from('events').select('*').eq('id',dd.event_id).single(); if(ev) openEventView(ev); } }catch(e){} }
-        else if(k==='gym_in_city'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ const { data:g }=await supaClient.from('gyms').select('*').eq('id',dd.gym_id).single(); if(g) openGymProfile(g); } }catch(e){} }
+        else if(k==='gym_in_city'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ const { data:g }=await supaClient.from('gyms_pub').select('*').eq('id',dd.gym_id).single(); if(g) openGymProfile(g); } }catch(e){} }
         else if(k==='fav_added_coach'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.coach_id && typeof openProfileById==='function'){ openProfileById(dd.coach_id); } }catch(e){} }
         else if(k==='demand_hotspot'){ try{ if(typeof openFounderMap==='function') openFounderMap((_pd.lat!=null&&_pd.lng!=null)?{ lat:+_pd.lat, lng:+_pd.lng }:null); }catch(e){} }
         else if(k==='demand_priority'){ try{ if(typeof closeAllSheets==='function') closeAllSheets(); }catch(e){} }
-        else if(k==='gym_team_approved'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ const { data:g }=await supaClient.from('gyms').select('*').eq('id',dd.gym_id).single(); if(g){ openGymProfile(g); } else { if(typeof setNav==='function') setNav('ni-me'); openSheet('shMe'); } } else { if(typeof setNav==='function') setNav('ni-me'); openSheet('shMe'); setTimeout(()=>{ const mm=$('meMyTeam'); if(mm){ try{ mm.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} } },300); } }catch(e){ openSheet('shMe'); } }
+        else if(k==='gym_team_approved'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ const { data:g }=await supaClient.from('gyms_pub').select('*').eq('id',dd.gym_id).single(); if(g){ openGymProfile(g); } else { if(typeof setNav==='function') setNav('ni-me'); openSheet('shMe'); } } else { if(typeof setNav==='function') setNav('ni-me'); openSheet('shMe'); setTimeout(()=>{ const mm=$('meMyTeam'); if(mm){ try{ mm.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} } },300); } }catch(e){ openSheet('shMe'); } }
         else if(k==='gym_join_request'){ try{ if($('meGymManage')){ window._gmInitTab=1; openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); setTimeout(()=>{ if(window._gmShowTab) window._gmShowTab(1);
           // V dashmode se sekce otevírá overlayem přes kliknutí na summary, ne atributem
           // `open` -- proto oznámení dosud skončilo v Nastavení a Tým si člověk musel najít.
@@ -35825,7 +35825,7 @@ async function loadNotifications(append){
         else if(k==='gym_member_joined_coach'){ try{ const dd=JSON.parse(n.data||'{}'); if(typeof openGymTeamDash==='function') openGymTeamDash(dd.gym_id||null,'','net'); }catch(e){} }
         else if(k==='sounding_ask'){ try{ var _sd=JSON.parse(n.data||'{}'); closeSheet('shNotif'); _openSoundingReply(_sd); }catch(e){} }
         else if(k==='qr_requeued'){ closeSheet('shNotif'); if(typeof openSheet==='function') openSheet('shBookings'); try{ if(typeof _upTab==='function') _upTab('skup'); }catch(e){} try{ if(typeof _renderPendingQr==='function') _renderPendingQr(); }catch(e){} }
-        else if(k==='qr_released'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym){ const { data:g }=await supaClient.from('gyms').select('*').eq('id',dd.gym).single(); if(g) openGymProfile(g); else toast(L('⚠️ Klub nenalezen')); } }catch(e){} }
+        else if(k==='qr_released'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym){ const { data:g }=await supaClient.from('gyms_pub').select('*').eq('id',dd.gym).single(); if(g) openGymProfile(g); else toast(L('⚠️ Klub nenalezen')); } }catch(e){} }
         else if(k==='qr_reservation_expired'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.coach && typeof openProfileById==='function') openProfileById(dd.coach); else toast(L('⚠️ Profil nenalezen')); }catch(e){ toast(L('⚠️ Profil nenalezen')); } }
         // Zachytná větev. Dřív tu bylo openOnline('coach'), takže KAŽDÁ notifikace, která se
         // netrefila do žádné podmínky výš, otevřela Online feedback -- u nových druhů oznámení
@@ -35887,7 +35887,7 @@ async function updateNotifBadge(){
   const _rest=(async function(){
   if(currentUser && currentUser.role==='founder') await updateAdminBadge();
   if(currentUser){
-    const { data: prof } = await supaClient.from('profiles').select('*').eq('id', currentUser.id).single();
+    const { data: prof } = await supaClient.from('profiles_me').select('*').eq('id', currentUser.id).single();
     if(prof){ currentUser=prof; updateRoleUI(); fillUserProfile(); try{ _syncTimezone(); }catch(e){} try{ _claimCohorts(); }catch(e){} try{ _claimTickets(); }catch(e){} }
   }
   try{ window._myNetCache=null; window._myTxCache=null; window._fdRevData=null; }catch(e){}
@@ -36054,7 +36054,7 @@ async function _loadBetaPending(){
   var wrap=document.getElementById('betaPendingWrap'); var list=document.getElementById('betaPendingList'); if(!wrap||!list) return;
   var EN=LANG==='en';
   var rows=[];
-  try{ const { data }=await supaClient.from('profiles').select('id,name,email,created_at,birthdate,is_minor,country,residence_country').eq('beta_status','pending').order('created_at',{ascending:false}).limit(200); rows=data||[]; }catch(e){}
+  try{ const { data }=await supaClient.from('profiles_admin').select('id,name,email,created_at,birthdate,is_minor,country,residence_country').eq('beta_status','pending').order('created_at',{ascending:false}).limit(200); rows=data||[]; }catch(e){}
   var cnt=document.getElementById('betaPendingCount'); if(cnt) cnt.textContent='('+rows.length+')';
   if(!rows.length){ wrap.style.display='none'; list.innerHTML=''; return; }
   wrap.style.display='block';
@@ -36411,7 +36411,7 @@ async function renderDac7(){
   const _chunk=async function(tbl, list, cols, into){ for(let i=0;i<list.length;i+=100){ try{ const { data }=await supaClient.from(tbl).select(cols).in('id',list.slice(i,i+100)); (data||[]).forEach(function(x){ into[x.id]=x; }); }catch(e){} } };
   await _chunk('gyms', ids('gym'), _sel+',owner_id', gm);
   await _chunk('organizations', ids('org'), 'id,name,legal_name,kind,tax_id,vat_id,vat_payer,billing_line1,billing_line2,billing_city,billing_postal,billing_country,country,receiver_id_value,owner_id', om);
-  await _chunk('profiles', ids('coach').concat(Object.values(gm).map(function(x){ return x.owner_id; })).filter(Boolean), 'id,name,legal_name,tax_id,vat_id,vat_payer,billing_line1,billing_line2,billing_city,billing_postal,billing_country,birthdate,receiver_id_value,payout_receiver_id_value', pm);
+  await _chunk('profiles_admin', ids('coach').concat(Object.values(gm).map(function(x){ return x.owner_id; })).filter(Boolean), 'id,name,legal_name,tax_id,vat_id,vat_payer,billing_line1,billing_line2,billing_city,billing_postal,billing_country,birthdate,receiver_id_value,payout_receiver_id_value', pm);
 
   const _hasSplit=function(x){ return !!(x && x.billing_line1 && x.billing_city && x.billing_postal); };
   const rows=keys.map(function(k){
@@ -37033,7 +37033,7 @@ function openFounderMap(focus){
     }catch(e){}
   }, 250); // počkej na layout sheetu
 }
-async function _mapOpenGym(id){ try{ const { data:g }=await supaClient.from('gyms').select('*').eq('id',id).single(); if(g) openGymProfile(g); }catch(e){} }
+async function _mapOpenGym(id){ try{ const { data:g }=await supaClient.from('gyms_pub').select('*').eq('id',id).single(); if(g) openGymProfile(g); }catch(e){} }
 function _gymsInCity(city){ try{ window._admGymCity=city||''; window._admGymNear=null; if(typeof closeSheet==='function') closeSheet('shFounderMap'); openSheet('shAllGyms'); if(typeof loadAdminGymList==='function') loadAdminGymList(); if(city) toast((LANG==='en'?'Clubs in ':'Kluby v ')+city); }catch(e){} }
 // Clubs near a POINT, not clubs whose city string happens to contain the cluster's label. The old
 // version matched gyms.city against the cluster name and found nothing -- and it would have failed
@@ -37212,7 +37212,7 @@ async function loadAdminCoachList(){
   const list=$('adminCoachList');
   if(!list) return;
   list.innerHTML=`<p style="color:var(--light);font-size:13px;">${L('Načítám...')}</p>`;
-  const { data } = await supaClient.from('profiles').select('id, name, photo_url, photo_thumb, rating, reviews, city, country, country_code, city_lat, city_lng, coach_status, suspend_reason, avail_status, verify_disciplines, cert_level, vat_id, payment_mode, created_at').in('coach_status',['approved','suspended']);
+  const { data } = await supaClient.from('profiles_admin').select('id, name, photo_url, photo_thumb, rating, reviews, city, country, country_code, city_lat, city_lng, coach_status, suspend_reason, avail_status, verify_disciplines, cert_level, vat_id, payment_mode, created_at').in('coach_status',['approved','suspended']);
   const coaches = data||[];
   let _riskC={}, _lastC={}; try{ const { data:_cbk } = await supaClient.from('bookings').select('coach_id,status,dispute_status,created_at'); (_cbk||[]).forEach(b=>{ if(!b.coach_id) return; const r=_riskC[b.coach_id]||(_riskC[b.coach_id]={tot:0,bad:0,disp:0}); r.tot++; if(b.status==='refunded') r.bad++; if(b.dispute_status==='open') r.disp++; if(b.created_at && (!_lastC[b.coach_id]||b.created_at>_lastC[b.coach_id])) _lastC[b.coach_id]=b.created_at; }); }catch(e){}
   const _riskFlagC=(id)=>{ const r=_riskC[id]; if(!r) return false; return (r.tot>=5 && r.bad/r.tot>=0.25) || r.disp>=2; };
@@ -37341,7 +37341,7 @@ async function renderGymAnalytics(gymId, containerId){
   }
 }
 async function _renderGymAnalyticsInner(gymId, box){
-  const { data: gym } = await supaClient.from('gyms').select('*').eq('id', gymId).single();
+  const { data: gym } = await supaClient.from('gyms_pub').select('*').eq('id', gymId).single();
   // Statistiky klubu vidí spolumajitel stejně jako majitel: jsou to čísla klubu, ne osobní.
   const _self = !window._gsAdminView && !!(currentUser && gym && (gym.owner_id===currentUser.id || (typeof _isGymBoss==='function' && _isGymBoss(gym))));
   const { data: _ds } = await supaClient.rpc('gym_dash_stats',{ p_gym_id: gymId });
@@ -37417,7 +37417,7 @@ async function _renderGymAnalyticsInner(gymId, box){
         _co.forEach(function(x){ _ids.add(x); });
       }catch(e){}
       if(_ids.size){
-        const { data:_pp }=await supaClient.from('profiles').select('id,name,email').in('id',[..._ids]);
+        const { data:_pp }=await supaClient.from('profiles_contact').select('id,name,email').in('id',[..._ids]);
         const _nm={}, _em={}; (_pp||[]).forEach(function(x){ _nm[x.id]=x.name||'—'; _em[x.id]=x.email||''; });
         window._admGymPeople={
           creator:_nm[_creatorId]||'—',
@@ -37993,7 +37993,7 @@ async function loadAdminGymRequests(){
     // owner names
     const ids=[...new Set(rows.map(r=>r.owner_id).filter(Boolean))];
     let names={};
-    try{ const { data:pr } = await supaClient.from('profiles').select('id,name,email').in('id',ids); (pr||[]).forEach(p=>{ names[p.id]=p.name||p.email||p.id; }); }catch(e){}
+    try{ const { data:pr } = await supaClient.from('profiles_admin').select('id,name,email').in('id',ids); (pr||[]).forEach(p=>{ names[p.id]=p.name||p.email||p.id; }); }catch(e){}
     box.innerHTML = rows.map(r=>{
       const c=r.changes||{};
       const who=escapeHtml(names[r.owner_id]||r.owner_id||'?');
@@ -38495,7 +38495,7 @@ async function renderFounderDash(){
     supaClient.from('bookings').select('amount, status, created_at, coach_id, discipline'),
     supaClient.from('gym_bookings').select('amount, status, created_at, discipline'),
     supaClient.from('gym_memberships').select('amount, status, created_at, discipline'),
-    supaClient.from('profiles').select('*').eq('coach_status','approved'),
+    supaClient.from('profiles_pub').select('*').eq('coach_status','approved'),
     supaClient.from('gyms').select('id, name, city, country, photos, membership_price, created_at, disciplines').eq('status','approved')
   ]);
   let B=rb.data||[], GB=rgb.data||[], GM=rgm.data||[], coaches=rc.data||[], gyms=rg.data||[];
@@ -38974,7 +38974,7 @@ async function openMtlCommissions(scope){
   // vykreslil pruh v dashboardu, který ho jinak nastavuje.
   try{
     const _ent=(_isCoachScope||!_myGymData)
-      ? await supaClient.from('profiles').select('commission_failed_at').eq('id',currentUser.id).maybeSingle()
+      ? await supaClient.from('profiles_me').select('commission_failed_at').eq('id',currentUser.id).maybeSingle()
       : await supaClient.from('gyms').select('commission_failed_at').eq('id',_myGymData.id).maybeSingle();
     window._commFailedAt=(_ent&&_ent.data&&_ent.data.commission_failed_at)||null;
   }catch(e){}
@@ -39661,7 +39661,7 @@ async function openAdminOrgDetail(org){
   try{
     const _pids=[org.owner_id, org.founder_id].filter(Boolean);
     if(_pids.length){
-      const { data }=await supaClient.from('profiles').select('id,name,email,phone,created_at,coach_status').in('id',_pids);
+      const { data }=await supaClient.from('profiles_admin').select('id,name,email,phone,created_at,coach_status').in('id',_pids);
       (data||[]).forEach(function(x){ if(x.id===org.owner_id) _own=x; if(x.id===org.founder_id) _fnd=x; });
     }
     if(!org.founder_id) _fnd=_own;   // bez sloupce (SQL ještě nespuštěné) = dnešní majitel, u nepřevedených sedí
@@ -44010,7 +44010,7 @@ async function renderCoachDash(){
        poplatku a vypadá jako marketingová báchorka. Dvě částky vedle sebe si kouč porovná sám. */
     + '<div style="font-size:10.5px;color:var(--light);line-height:1.45;padding:4px 6px 2px;">'+(EN?'Counts since this feature went live; grows as students discover you on MTL.':'Počítá se od spuštění této funkce; roste, jak tě lidé nacházejí na MTL.')+'</div>';
   const magnetAcc = HDR('🧲',(EN?'Brought via the MTL App':'Přivedeno přes MTL appku'),'') + wrap(magnetRows);
-  try{ const { data:_cc } = await supaClient.from('profiles').select('account_suspended,cash_blocked,commission_failed_at,commission_next_retry,commission_card_brand,commission_card_last4').eq('id',currentUser.id).single(); window._myCoachComm=_cc||null; }catch(e){ window._myCoachComm=null; }
+  try{ const { data:_cc } = await supaClient.from('profiles_me').select('account_suspended,cash_blocked,commission_failed_at,commission_next_retry,commission_card_brand,commission_card_last4').eq('id',currentUser.id).single(); window._myCoachComm=_cc||null; }catch(e){ window._myCoachComm=null; }
   let _ccCoachHtml=''; try{ if(typeof _cashCard==='function') _ccCoachHtml=await _cashCard('coach',currentUser.id,_pragueMonth(),window._myCoachComm); }catch(e){}
   box.innerHTML=(typeof _commissionBanner==='function'?_commissionBanner(window._myCoachComm,'coach'):'')+_ccCoachHtml+'<select id="cdMonthSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:\'DM Sans\';background:#fff;margin-bottom:10px;">'+monthOpts+'</select>'
     +heroHtml+cardsHtml+note
@@ -44494,7 +44494,9 @@ async function _renderCoachAnalyticsInner(coachId, box){
   const _self = !window._csAdminView && !!(currentUser && (coachId===currentUser.id || coachId===currentUser.profileId));
 
   const { data: allB } = await supaClient.from('bookings').select('*').eq('coach_id', coachId);
-  const { data: prof } = await supaClient.from('profiles').select('rating, reviews, coach_status, name, founding, partner, partner_tier, bankai_eligible, disciplines, verify_disciplines, pending_discipline, coach_ref_score, coach_ref_unlocked, partner_until, cert_level, bio, gym, active_students, years, fights, payment_mode, stripe_account, commission_daily,city,country,currency,currency_inperson,currency_online,partner_price,partner_currency,partner_until,email').eq('id', coachId).single();
+  // E-mail kouče jen jemu samému a zakladateli (citlivý sloupec, sql/rls-3-profiles.sql).
+  const _paTbl = _self ? 'profiles_me' : (_profX()==='profiles_admin' ? 'profiles_admin' : 'profiles');
+  const { data: prof } = await supaClient.from(_paTbl).select('rating, reviews, coach_status, name, founding, partner, partner_tier, bankai_eligible, disciplines, verify_disciplines, pending_discipline, coach_ref_score, coach_ref_unlocked, partner_until, cert_level, bio, gym, active_students, years, fights, payment_mode, stripe_account, commission_daily,city,country,currency,currency_inperson,currency_online,partner_price,partner_currency,partner_until'+(_paTbl==='profiles'?'':',email')).eq('id', coachId).single();
   const _vd=(()=>{ try{ const a=prof&&prof.verify_disciplines?(typeof prof.verify_disciplines==='string'?JSON.parse(prof.verify_disciplines):prof.verify_disciplines):[]; return Array.isArray(a)?a:[]; }catch(e){ return []; } })();
   const _td=(()=>{ try{ const a=prof&&prof.disciplines?(typeof prof.disciplines==='string'?JSON.parse(prof.disciplines):prof.disciplines):[]; return Array.isArray(a)?a:[]; }catch(e){ return []; } })();
   const _pend=(prof&&prof.pending_discipline)||'';
@@ -44652,7 +44654,7 @@ async function openProfileById(coachId){
   const c = COACHES.find(x=>x.profileId===coachId || x.id===coachId);
   if(c) return openProfile(c);
   try{
-    const { data } = await supaClient.from('profiles').select('*').eq('id', coachId).single();
+    const { data } = await supaClient.from('profiles_pub').select('*').eq('id', coachId).single();
     if(data && typeof _mapCoachRow==='function') return openProfile(_mapCoachRow(data));
   }catch(e){}
   toast(L('⚠️ Profil kouče se nepodařilo načíst'));
@@ -44979,7 +44981,7 @@ async function loadDiaryData(){
   try{
     const _sids=[...new Set((diaryBookings||[]).map(b=>b.student_id).filter(Boolean))];
     if(_sids.length){
-      const { data:_ps } = await supaClient.from('profiles').select('id,name,phone,phone_show').in('id', _sids.slice(0,200));
+      const { data:_ps } = await supaClient.from('profiles_contact').select('id,name,phone,phone_show').in('id', _sids.slice(0,200));
       const _m={}; (_ps||[]).forEach(p=>{ _m[p.id]=p; });
       diaryBookings.forEach(b=>{
         const p=_m[b.student_id]; if(!p) return;
@@ -46286,8 +46288,8 @@ async function _openGymMemberDetailInner(sid, name){
   const [_rM,_rA,_rP,_rG,_rD,_rGr,_rBl,_rPv,_addrD,_rTx,_xp]=await Promise.all([
     _q(supaClient.from('gym_memberships').select('*').eq('gym_id',_gid).eq('student_id',sid).order('created_at',{ascending:true})),
     _q(supaClient.from('gym_attendance').select('class_date,class_name,class_id').eq('gym_id',_gid).eq('student_id',sid)),
-    _q(supaClient.from('profiles').select('belts,is_fighter,fight_record,is_minor,phone,phone_show,email,photo_url').eq('id',sid).single()),
-    _q(supaClient.from('profiles').select('guardian_name,guardian_email,guardian_phone').eq('id',sid).maybeSingle()),
+    _q(supaClient.from('profiles_contact').select('belts,is_fighter,fight_record,is_minor,phone,phone_show,email,photo_url').eq('id',sid).single()),
+    _q(supaClient.from('profiles_contact').select('guardian_name,guardian_email,guardian_phone').eq('id',sid).maybeSingle()),
     _q(supaClient.from('gym_bookings').select('id,status,is_trial,club_cancelled_at').eq('gym_id',_gid).eq('student_id',sid)),
     _q(supaClient.from('grace_visits').select('*').eq('gym_id',_gid).eq('student_id',sid).eq('settled',false).order('visit_date',{ascending:true})),
     _q(supaClient.from('blocked_students').select('id').eq('gym_id',_gid).eq('student_id',sid).maybeSingle()),
@@ -46530,7 +46532,7 @@ async function openProblematicStudents(){
   const EN=LANG==='en';
   if(!currentUser || currentUser.id!==FOUNDER_UUID){ toast(EN?'Founder only':'Jen pro foundera'); return; }
   let students=[];
-  try{ const { data }=await supaClient.from('profiles').select('id,name,email,risk_flag,risk_note,suspended').eq('risk_flag',true).order('name',{ascending:true}); students=data||[]; }catch(e){}
+  try{ const { data }=await supaClient.from('profiles_admin').select('id,name,email,risk_flag,risk_note,suspended').eq('risk_flag',true).order('name',{ascending:true}); students=data||[]; }catch(e){}
   const counts={};
   try{ const { data }=await supaClient.from('student_reports').select('student_id'); (data||[]).forEach(function(r){ counts[r.student_id]=(counts[r.student_id]||0)+1; }); }catch(e){}
   const ov=document.createElement('div'); ov.id='probStudentsOv';
@@ -47402,7 +47404,7 @@ async function openMilestones(){
   
 
   if(isFounder){ let fInner=''; try{
-    const cnt=async(tbl,col,val)=>{ try{ let q=supaClient.from(tbl).select('*',{count:'exact',head:true}); if(col)q=q.eq(col,val); const {count}=await q; return count||0; }catch(e){ return 0; } };
+    const cnt=async(tbl,col,val)=>{ try{ let q=supaClient.from(tbl).select('id',{count:'exact',head:true}); if(col)q=q.eq(col,val); const {count}=await q; return count||0; }catch(e){ return 0; } };
     const studs=await cnt('profiles');
     const coaches=await cnt('profiles','coach_status','approved'), gyms=await cnt('gyms','status','approved'), book=await cnt('bookings'), online=await cnt('bookings','type','online');
     fInner+=`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;">${counter('🧑',EN?'students':'studentů',studs)}${counter('🥋',EN?'coaches':'koučů',coaches)}${counter('🏛️',EN?'clubs':'klubů',gyms)}${counter('🥊',EN?'bookings':'rezerv.',book)}${counter('🌐',EN?'online':'online',online)}</div>`;
@@ -47681,7 +47683,7 @@ async function openGymKidDetail(parentId, childName){
   const accOf=(m)=>{ try{ const pa=typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access; return (pa&&pa.length)?pa:['all']; }catch(e){ return ['all']; } };
   // Data souběžně
   const [prR, attR, bkR, kmR, addrD]=await Promise.all([
-    supaClient.from('profiles').select('children,name,phone,phone_show,email').eq('id',parentId).single().then(function(r){ return r; }, function(){ return {}; }),
+    supaClient.from('profiles_contact').select('children,name,phone,phone_show,email').eq('id',parentId).single().then(function(r){ return r; }, function(){ return {}; }),
     supaClient.from('gym_attendance').select('id,class_date').eq('gym_id',_myGymData.id).eq('student_id',parentId).eq('child_name',childName).order('class_date',{ascending:false}).then(function(r){ return r; }, function(){ return {}; }),
     supaClient.from('gym_bookings').select('id').eq('gym_id',_myGymData.id).eq('student_id',parentId).eq('child_name',childName).in('status',['active','paid','paid_claimed']).then(function(r){ return r; }, function(){ return {}; }),
     supaClient.from('gym_memberships').select('id,plan_name,amount,currency,status,stripe_subscription,created_at,period_end,plan_access,student_name').eq('gym_id',_myGymData.id).eq('student_id',parentId).eq('child_name',childName).order('created_at',{ascending:true}).then(function(r){ return r; }, function(){ return {}; }),
@@ -47774,7 +47776,7 @@ async function openGymKidDetail(parentId, childName){
 }
 async function setKidBelt(disc, belt, stripes){
   try{ const EN=LANG==='en'; const ctx=window._mdKid; if(!ctx) return; const key=beltKeyFor(disc);
-    const { data:_pr } = await supaClient.from('profiles').select('children').eq('id',ctx.parentId).single();
+    const { data:_pr } = await supaClient.from('profiles_contact').select('children').eq('id',ctx.parentId).single();
     let kids=_pr&&_pr.children?(typeof _pr.children==='string'?JSON.parse(_pr.children):_pr.children):[];
     const idx=(kids||[]).findIndex(c=>c&&c.name===ctx.childName); if(idx<0) return;
     let belts=_kidBeltsOf(kids[idx]);
@@ -47788,7 +47790,7 @@ async function setKidBelt(disc, belt, stripes){
 }
 async function announceKidBelt(disc){
   try{ const EN=LANG==='en'; const ctx=window._mdKid; if(!ctx) return; const key=beltKeyFor(disc);
-    const { data:_pr } = await supaClient.from('profiles').select('children').eq('id',ctx.parentId).single();
+    const { data:_pr } = await supaClient.from('profiles_contact').select('children').eq('id',ctx.parentId).single();
     let kids=_pr&&_pr.children?(typeof _pr.children==='string'?JSON.parse(_pr.children):_pr.children):[];
     const idx=(kids||[]).findIndex(c=>c&&c.name===ctx.childName); if(idx<0) return;
     let belts=_kidBeltsOf(kids[idx]); const bb=belts[key]; if(!bb||!bb.belt) return;
@@ -48488,7 +48490,7 @@ async function loadFoundingState(){
   try{
     const { data: f } = await supaClient.from('profiles').select('founding_window').eq('id', FOUNDER_UUID).single();
     const windowOpen = !(f && f.founding_window === false); // default ZAP
-    const { count } = await supaClient.from('profiles').select('*', { count:'exact', head:true }).eq('founding', true);
+    const { count } = await supaClient.from('profiles').select('id', { count:'exact', head:true }).eq('founding', true);
     const taken = count || 0;
     _foundingLeft = Math.max(0, _foundingCap - taken);
     _foundingOpen = false; // founding tier removed
@@ -51181,7 +51183,7 @@ function _authToLogin(){ try{ authMode='login'; if($('authName')) $('authName').
 async function _lockDobAndNext(){
   if(_suUserId){
     try{
-      const { data:ex } = await supaClient.from('profiles').select('birthdate,is_minor').eq('id',_suUserId).limit(1);
+      const { data:ex } = await supaClient.from('profiles_me').select('birthdate,is_minor').eq('id',_suUserId).limit(1);
       const row=(ex&&ex[0])||null;
       if(row && row.birthdate){ _signupDob=row.birthdate; _signupMinor=!!row.is_minor; }
       else {
@@ -51946,7 +51948,7 @@ $('btnAuthSubmit').onclick=async()=>{
     $('authError').style.display='none';
     
     // Načti profil
-    const { data: prof } = await supaClient.from('profiles').select('*').eq('id', data.user.id).single();
+    const { data: prof } = await supaClient.from('profiles_me').select('*').eq('id', data.user.id).single();
     // Přihlášení nedokončenou registrací nesmí pustit dovnitř. Dřív se tu profil nahradil
     // objektem v paměti a člověk prošel bez jména, data narození i souhlasů.
     if(_regIncomplete(prof)){ await _resumeReg(data.user.id, email); return; }
@@ -52039,7 +52041,7 @@ async function ensureReferral(){
       const _rpb = (function(){ try{ return localStorage.getItem('mtl_recp_buy')||'d'; }catch(e){ return 'd'; } })();
       if(_rpg && currentUser){
         try{ localStorage.removeItem('mtl_recp_gym'); localStorage.removeItem('mtl_recp_buy'); }catch(e){}
-        try{ const { data:_rgx } = await supaClient.from('gyms').select('*').eq('id', _rpg).single(); if(_rgx && _rgx.id){ setTimeout(function(){ _recpBuyResolve(_rgx, _rpb); }, 400); } }catch(e){}
+        try{ const { data:_rgx } = await supaClient.from('gyms_pub').select('*').eq('id', _rpg).single(); if(_rgx && _rgx.id){ setTimeout(function(){ _recpBuyResolve(_rgx, _rpb); }, 400); } }catch(e){}
       }
     }catch(e){}
     // Coach own-student link (?own=1&coach=<id>) -> auto-favorite that coach + notify
@@ -54154,7 +54156,7 @@ async function _resumeReg(userId, email){
 async function checkAuth(){
   const { data } = await supaClient.auth.getSession();
   if(data.session){
-    const { data: prof } = await supaClient.from('profiles').select('*').eq('id', data.session.user.id).single();
+    const { data: prof } = await supaClient.from('profiles_me').select('*').eq('id', data.session.user.id).single();
     if(prof && prof.purged_at){ try{ await supaClient.auth.signOut(); }catch(e){} return; }
     if(prof && prof.deleted_at){ openRestorePrompt(prof); return; }
     if(_regIncomplete(prof)){
@@ -54404,7 +54406,7 @@ async function _ownerXferForm(it, admin, after){
   if(isGym){
     try{ const { data:cc }=await supaClient.from('gym_coaches').select('coach_id').eq('gym_id',it.id).eq('co_owner',true).eq('status','active');
       const ids=(cc||[]).map(function(x){ return x.coach_id; }).filter(Boolean);
-      if(ids.length){ const { data:pp }=await supaClient.from('profiles').select('id,name,email').in('id',ids); cos=pp||[]; } }catch(e){}
+      if(ids.length){ const { data:pp }=await supaClient.from(_profX()).select('id,name,email').in('id',ids); cos=pp||[]; } }catch(e){}
   }
   if(isGym && !admin && !cos.length){
     toast(EN?'⚠️ A club can only be handed to an active co-owner. Make someone a co-owner in Team first.':'⚠️ Klub jde předat jen aktivnímu spolumajiteli. Nejdřív v Týmu někoho udělej spolumajitelem.', 1); return;
@@ -54621,7 +54623,7 @@ async function _openMyClub(){
 }
 async function _openClubById(gymId){
   try{
-    const { data: g } = await supaClient.from('gyms').select('*').eq('id', gymId).single();
+    const { data: g } = await supaClient.from('gyms_pub').select('*').eq('id', gymId).single();
     if(g && typeof openGymProfile==='function') openGymProfile(g);
     else toast('\u26a0\ufe0f '+(LANG==='en'?'Club not found':'Klub nenalezen'));
   }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
@@ -56587,7 +56589,7 @@ async function showPaidPopup(){
       let _rc=0; while(!currentUser && _rc<25){ await new Promise(r=>setTimeout(r,200)); _rc++; }
       if(currentUser){
         try{ window.history.replaceState({}, '', location.pathname); }catch(e){}
-        try{ const { data:_rg } = await supaClient.from('gyms').select('*').eq('id', _rbg).single(); if(_rg && _rg.id){ _recpBuyResolve(_rg, _rbb); } }catch(e){}
+        try{ const { data:_rg } = await supaClient.from('gyms_pub').select('*').eq('id', _rbg).single(); if(_rg && _rg.id){ _recpBuyResolve(_rg, _rbb); } }catch(e){}
         return;
       } else { try{ localStorage.setItem('mtl_recp_gym', _rbg); localStorage.setItem('mtl_recp_buy', _rbb); }catch(e){} }
     }
@@ -56658,7 +56660,7 @@ async function showPaidPopup(){
     document.body.style.background='#fff'; document.body.style.color='#111';
     try{
       const gymId=params.get('gym'), cls=params.get('cls')||'Drop-in', date=params.get('date'), time=params.get('time'), coach=params.get('coach')||null, level=params.get('level')||'all', disc=params.get('disc')||null, amt=parseInt(params.get('amt')||'0',10)||0, cur=params.get('cur')||'CZK', tok=params.get('tok')||('g'+Date.now());
-      const { data: g } = await supaClient.from('gyms').select('*').eq('id', gymId).single();
+      const { data: g } = await supaClient.from('gyms_pub').select('*').eq('id', gymId).single();
       if(!g){ document.body.innerHTML='<p style="padding:40px;text-align:center;font-family:sans-serif;">Klub not found.</p>'; return; }
       const _proceedPay = async function(_termsEmail){
        try{
@@ -56860,7 +56862,7 @@ async function showPaidPopup(){
     if(currentUser) setTimeout(async function(){ try{
       if(_go==='billing'){ if(_k==='gym' && typeof checkGymOwnership==='function') await checkGymOwnership(); _openProviderBilling(_k, _id); return; }
       const _tbl=({ gym:'gyms', coach:'profiles', org:'organizations' })[_k]; if(!_tbl||!_id) return;
-      const { data:_r }=await supaClient.from(_tbl).select('*').eq('id',_id).maybeSingle();
+      const { data:_r }=await supaClient.from(({ profiles:'profiles_me', gyms:'gyms_mine' })[_tbl]||_tbl).select('*').eq('id',_id).maybeSingle();
       if(_r && _r.account_suspended && _r.suspend_manual) _showManualSuspension({ entity:_k, id:_id, name:_r.name, reason:_r.suspend_reason, howto:_r.suspend_howto, at:_r.suspended_at });
       else toast(LANG==='en'?'\u2705 This account is not suspended (any more).':'\u2705 \u00da\u010det u\u017e nen\u00ed pozastaven\u00fd.', 1);
     }catch(e){} }, 1200);
